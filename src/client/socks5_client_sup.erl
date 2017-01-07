@@ -1,5 +1,7 @@
 -module(socks5_client_sup).
 
+-author("ao.song@outlook.com").
+
 -behaviour(supervisor).
 
 -include("socks5.hrl").

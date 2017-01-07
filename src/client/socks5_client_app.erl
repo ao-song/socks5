@@ -1,5 +1,7 @@
 -module(socks5_client_app).
 
+-author("ao.song@outlook.com").
+
 -behaviour(application).
 
 %% Application callbacks

@@ -2,6 +2,8 @@
 
 -behaviour(supervisor).
 
+-author("ao.song@outlook.com").
+
 -include("socks5.hrl").
 
 %% API

@@ -2,6 +2,8 @@
 -behaviour(gen_server).
 -define(SERVER, ?MODULE).
 
+-author("ao.song@outlook.com").
+
 -include("socks5.hrl").
 
 %% ------------------------------------------------------------------

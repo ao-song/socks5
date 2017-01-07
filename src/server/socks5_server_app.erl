@@ -2,6 +2,8 @@
 
 -behaviour(application).
 
+-author("ao.song@outlook.com").
+
 %% Application callbacks
 -export([start/2, stop/1]).
 

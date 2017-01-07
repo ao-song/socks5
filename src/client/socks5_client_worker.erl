@@ -1,6 +1,8 @@
 -module(socks5_client_worker).
 -behaviour(gen_server).
 
+-author("ao.song@outlook.com").
+
 -define(SERVER, ?MODULE).
 
 -include("socks5.hrl").
