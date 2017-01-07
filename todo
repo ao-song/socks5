@@ -1,0 +1,8 @@
+1. fully-qualified domain name;
+2. authentication protocols support;
+3. message crypto;
+4. bind
+5. UDP support
+6. Data forward
+7. log
+8. app it
