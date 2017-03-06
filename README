@@ -2,11 +2,10 @@ A socks5 client/server written in erlang which follows RFC1928. It is a project 
 
 todo:
 
-1. fully-qualified domain name;
-2. authentication protocols support;
-3. message crypto;
-4. bind
-5. UDP support
-6. Data forward
-7. log
-8. app it
+
+- UDP support
+- fully-qualified domain name;
+- authentication protocols support;
+- message crypto;
+- bind
+- app it
