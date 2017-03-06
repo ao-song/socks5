@@ -2,14 +2,14 @@
 -define(SOCK_OPTIONS,
 	    [{active, false} |
 	     binary          |
-         {packet, 4}     |
+         {packet, 0}     |
 	     {nodelay, true} |
          {reuseaddr, true}]).
 
 -define(SOCK_SERVER_OPTIONS,
         [{active, once}  |
          binary          |
-         {packet, 4}     |
+         {packet, 0}     |
          {nodelay, true} |
          {reuseaddr, true}]).
 
@@ -51,6 +51,9 @@
 %% Helper macro for declaring children of supervisor
 -define(CHILD(I, Type, Arg), 
         {I, {I, start_link, Arg}, permanent, infinity, Type, [I]}).
+
+-define(LOG(A1), io:format(A1)).
+-define(LOG(A1,A2), io:format(A1,A2)).
 
 
 %% Record
