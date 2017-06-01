@@ -1,9 +1,9 @@
 %% Macro
 -define(SOCK_OPTIONS,
-	    [{active, false} |
-	     binary          |
+        [{active, false} |
+         binary          |
          {packet, 0}     |
-	     {nodelay, true} |
+         {nodelay, true} |
          {reuseaddr, true}]).
 
 -define(SOCK_SERVER_OPTIONS,

@@ -32,10 +32,10 @@ start_link() ->
 
 init(Port) ->
     case gen_tcp:listen(Port, ?SOCK_OPTIONS) of
-    	{ok, ListenSocket} ->            
-    	    {ok, accept(#listener_state{listener = ListenSocket})};
-    	{error, Reason} ->
-    	    ?LOG("Server: listen error, ~p~n.", [Reason]),
+        {ok, ListenSocket} ->            
+            {ok, accept(#listener_state{listener = ListenSocket})};
+        {error, Reason} ->
+            ?LOG("Server: listen error, ~p~n.", [Reason]),
             {stop, Reason}
     end.
 

@@ -42,10 +42,10 @@ connect(DstHost, DstPort) ->
 
 init([{SrvIP, SrvPort}]) ->
     case gen_tcp:connect(SrvIP, SrvPort, ?SOCK_OPTIONS) of
-    	{ok, Socket} ->
+      {ok, Socket} ->
           method_negotiation(Socket, #client_state{socket = Socket});
-    	{error, Reason} ->
-    	    ?LOG("Client: Socks server connect error, ~p~n.", [Reason]),
+      {error, Reason} ->
+          ?LOG("Client: Socks server connect error, ~p~n.", [Reason]),
           {stop, Reason}
     end.
 
