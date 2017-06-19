@@ -54,7 +54,8 @@ init(_Args) ->
     {ok, Method} = handle_request(auth_method_negotiation, 
                                   {Socket, ?NO_AUTHENTICATION_REQUIRED}),
     {next_state, 'WAIT_FOR_CONNECT', State#worker_state{auth_method = Method,
-                                                     authed_client = true}};
+                                                        authed_client = true}}.
+
 'WAIT_FOR_CONNECT'({bin, <<?SOCKS_VERSION:8, 
                            ?CONNECT:8, 
                            ?RSV:8, 
