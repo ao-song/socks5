@@ -1,0 +1,12 @@
+{application,socks5,
+             [{description,"A socks5 application"},
+              {vsn,"0.1.0"},
+              {registered,[]},
+              {mod,{socks5_app,[]}},
+              {applications,[kernel,stdlib]},
+              {env,[]},
+              {modules,[socks5_app,socks5_listener,socks5_sup,socks5_worker,
+                        socks5_worker_sup]},
+              {maintainers,[]},
+              {licenses,["Apache 2.0"]},
+              {links,[]}]}.

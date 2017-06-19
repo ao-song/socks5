@@ -1,16 +1,16 @@
 %% Macro
 -define(SOCK_OPTIONS,
-        [{active, false} |
-         binary          |
-         {packet, 0}     |
-         {nodelay, true} |
+        [{active, false},
+         binary,
+         {packet, 0},
+         {nodelay, true},
          {reuseaddr, true}]).
 
 -define(SOCK_SERVER_OPTIONS,
-        [{active, once}  |
-         binary          |
-         {packet, 0}     |
-         {nodelay, true} |
+        [{active, once},
+         binary,
+         {packet, 0},
+         {nodelay, true},
          {reuseaddr, true}]).
 
 -define(MAX_RESTART, 5).
@@ -64,6 +64,12 @@
          bound_addr :: tuple(),
          bound_port :: integer()
         }).
+
+
+-record(listener_state,
+       {
+        listener
+       }).
 
 -record(server_state,
         {

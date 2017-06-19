@@ -2,6 +2,8 @@
 -behaviour(gen_fsm).
 -define(SERVER, ?MODULE).
 
+-include("socks5.hrl").
+
 -author("ao.song@outlook.com").
 
 %% ------------------------------------------------------------------
@@ -15,7 +17,7 @@
 %% gen_fsm Function Exports
 %% ------------------------------------------------------------------
 
--export([init/1, state_name/2, state_name/3, handle_event/3,
+-export([init/1, handle_event/3,
          handle_sync_event/4, handle_info/3, terminate/3,
          code_change/4]).
 
@@ -40,7 +42,7 @@ init(_Args) ->
 %% state
 'WAIT_FOR_SOCKET'({socket_ready, Socket}, _State) when is_port(Socket) ->
     inet:setopts(Socket, ?SOCK_SERVER_OPTIONS),
-    {next_state, 'WAIT_FOR_AUTH', #worker_state{socket = Socket}}, ?TIMEOUT};
+    {next_state, 'WAIT_FOR_AUTH', #worker_state{socket = Socket}};
 'WAIT_FOR_SOCKET'(Other, State) ->
     ?LOG("State: 'WAIT_FOR_SOCKET'. Unexpected message: ~p\n", [Other]),
     {next_state, 'WAIT_FOR_SOCKET', State}.    
@@ -89,7 +91,7 @@ init(_Args) ->
                                 target_socket = DstSocket}};
         {error, Reason} ->
             {next_state, 'WAIT_FOR_CONNECT', State}
-    end;
+    end.
 
 
 'WAIT_FOR_DATA'({toS, Data}, #worker_state{target_socket=Socket} = State) ->
@@ -102,7 +104,8 @@ init(_Args) ->
     ?LOG("Client connection timeout. ~n"),
     {stop, normal, State}.
 
-
+handle_event({socket_ready, Socket}, _StateName, State) ->
+    {next_state, 'WAIT_FOR_SOCKET', State, ?TIMEOUT};
 handle_event(Event, StateName, State) ->
     {stop, {StateName, undefined_event, Event}, State}.
 
@@ -128,8 +131,10 @@ handle_info({tcp_closed, Socket}, _StateName,
 handle_info(_Info, StateName, State) ->
     {noreply, StateName, State}.
 
-terminate(_Reason, _StateName, #worker_state{socket=Socket}) ->
+terminate(_Reason, _StateName, #worker_state{socket=Socket,
+                                             target_socket=TarSocket}) ->
     ok = gen_tcp:close(Socket),
+    ok = gen_tcp:close(TarSocket),
     ok.
 
 code_change(_OldVsn, StateName, State, _Extra) ->
