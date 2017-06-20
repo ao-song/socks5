@@ -30,7 +30,7 @@ start_link() ->
 %% gen_server Function Definitions
 %% ------------------------------------------------------------------
 
-init(Port) ->
+init([Port]) ->
     case gen_tcp:listen(Port, ?SOCK_OPTIONS) of
         {ok, ListenSocket} ->            
             {ok, accept(#listener_state{listener = ListenSocket})};
@@ -40,7 +40,7 @@ init(Port) ->
     end.
 
 accept(#listener_state{listener = ListenSocket} = State) ->
-    proc_lib:spawn(?SERVER, accept_loop, ListenSocket),
+    proc_lib:spawn(fun() -> accept_loop(ListenSocket) end),
     State.
 
 accept_loop(ListenSocket) ->
