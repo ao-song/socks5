@@ -1,0 +1,3 @@
+{release,{"socks5","0.1.0"},
+         {erts,"7.3"},
+         [{kernel,"4.2"},{stdlib,"2.8"},{socks5,"0.1.0"},{sasl,"2.7"}]}. 

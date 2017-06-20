@@ -21,6 +21,11 @@
          handle_sync_event/4, handle_info/3, terminate/3,
          code_change/4]).
 
+-export(['WAIT_FOR_SOCKET'/2,
+         'WAIT_FOR_AUTH'/2,
+         'WAIT_FOR_CONNECT'/2,
+         'WAIT_FOR_DATA'/2]).
+
 %% ------------------------------------------------------------------
 %% API Function Definitions
 %% ------------------------------------------------------------------
@@ -72,7 +77,7 @@ init(_Args) ->
              'WAIT_FOR_DATA', 
              State#worker_state{connect = true,
                                 target_socket = DstSocket}};
-        {error, Reason} ->
+        {error, _Reason} ->
             {next_state, 'WAIT_FOR_CONNECT', State}
     end;    
 'WAIT_FOR_CONNECT'({bin, <<?SOCKS_VERSION:8, 
@@ -89,7 +94,7 @@ init(_Args) ->
              'WAIT_FOR_DATA', 
              State#worker_state{connect = true,
                                 target_socket = DstSocket}};
-        {error, Reason} ->
+        {error, _Reason} ->
             {next_state, 'WAIT_FOR_CONNECT', State}
     end.
 
@@ -104,19 +109,27 @@ init(_Args) ->
     ?LOG("Client connection timeout. ~n"),
     {stop, normal, State}.
 
-handle_event({socket_ready, Socket}, _StateName, State) ->
-    {next_state, 'WAIT_FOR_SOCKET', State, ?TIMEOUT};
+handle_event({socket_ready, Socket}, 'WAIT_FOR_SOCKET'=StateName, State) ->
+    ?SERVER:StateName({socket_ready, Socket}, State);
 handle_event(Event, StateName, State) ->
     {stop, {StateName, undefined_event, Event}, State}.
 
 handle_sync_event(Event, _From, StateName, State) ->
     {stop, {StateName, undefined_event, Event}, State}.
 
-handle_info({tcp, Socket, Data}, StateName, 
+handle_info({tcp, Socket, Data}, 'WAIT_FOR_AUTH'=StateName, 
+            State) ->
+    inet:setopts(Socket, [{active, once}]),
+    ?SERVER:StateName({bin, Data}, State);
+handle_info({tcp, Socket, Data}, 'WAIT_FOR_CONNECT'=StateName, 
+            State) ->
+    inet:setopts(Socket, [{active, once}]),
+    ?SERVER:StateName({bin, Data}, State);    
+handle_info({tcp, Socket, Data}, 'WAIT_FOR_DATA'=StateName, 
             #worker_state{socket=Socket} = State) ->
     inet:setopts(Socket, [{active, once}]),
     ?SERVER:StateName({toS, Data}, State);
-handle_info({tcp, Socket, Data}, StateName, 
+handle_info({tcp, Socket, Data}, 'WAIT_FOR_DATA'=StateName, 
             #worker_state{target_socket=Socket} = State) ->
     inet:setopts(Socket, [{active, once}]),
     ?SERVER:StateName({toC, Data}, State);
