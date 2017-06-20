@@ -66,6 +66,23 @@ init(_Args) ->
 'WAIT_FOR_CONNECT'({bin, <<?SOCKS_VERSION:8, 
                            ?CONNECT:8, 
                            ?RSV:8, 
+                           ?DOMAINNAME:8, 
+                           Len:8, 
+                           Hostname:Len/binary, DstPort:16>>}, 
+                #worker_state{socket = Socket, 
+                              authed_client = true} = State) ->
+    case handle_request(connect, {Socket, binary_to_list(Hostname), DstPort}) of
+        {ok, DstSocket} ->
+            {next_state, 
+             'WAIT_FOR_DATA', 
+             State#worker_state{connect = true,
+                                target_socket = DstSocket}};
+        {error, _Reason} ->
+            {next_state, 'WAIT_FOR_CONNECT', State}
+    end;  
+'WAIT_FOR_CONNECT'({bin, <<?SOCKS_VERSION:8, 
+                           ?CONNECT:8, 
+                           ?RSV:8, 
                            ?ATYP_IPV4:8, 
                            A:8, B:8, C:8, D:8, 
                            DstPort:16>>}, 
@@ -144,6 +161,10 @@ handle_info({tcp_closed, Socket}, _StateName,
 handle_info(_Info, StateName, State) ->
     {noreply, StateName, State}.
 
+terminate(_Reason, _StateName, #worker_state{socket=Socket,
+                                             target_socket=undefined}) ->
+    ok = gen_tcp:close(Socket),
+    ok;
 terminate(_Reason, _StateName, #worker_state{socket=Socket,
                                              target_socket=TarSocket}) ->
     ok = gen_tcp:close(Socket),

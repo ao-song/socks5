@@ -15,8 +15,6 @@ todo:
 
 
 - UDP support
-- fully-qualified domain name;
 - authentication protocols support;
 - message crypto;
 - bind
-- app it
