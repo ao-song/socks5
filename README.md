@@ -22,8 +22,8 @@ Todo:
 
 - Code optimization
 - UDP support
-- authentication protocols support;
-- message encryption;
+- authentication protocols support
+- message encryption
 - bind
 
 Contribution is welcome!
