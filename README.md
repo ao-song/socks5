@@ -3,7 +3,7 @@ socks5
 
 A socks5 proxy implemented in erlang
 
-Build
+Build and Run
 -----
 
     $ ./rebar3 release
