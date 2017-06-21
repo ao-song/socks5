@@ -31,7 +31,7 @@
 %% ------------------------------------------------------------------
 
 start_link() ->
-    gen_fsm:start_link({local, ?SERVER}, ?MODULE, [], []).
+    gen_fsm:start_link(?MODULE, [], []).
 
 set_socket(Child, Socket) when is_pid(Child), is_port(Socket) ->
     gen_fsm:send_event(Child, {socket_ready, Socket}).
@@ -161,14 +161,19 @@ handle_info({tcp_closed, Socket}, _StateName,
 handle_info(_Info, StateName, State) ->
     {noreply, StateName, State}.
 
-terminate(_Reason, _StateName, #worker_state{socket=Socket,
-                                             target_socket=undefined}) ->
-    ok = gen_tcp:close(Socket),
-    ok;
+
 terminate(_Reason, _StateName, #worker_state{socket=Socket,
                                              target_socket=TarSocket}) ->
-    ok = gen_tcp:close(Socket),
-    ok = gen_tcp:close(TarSocket),
+    case {Socket, TarSocket} of
+        {undefined, undefined} -> ok;
+        {Socket, undefined} -> 
+            gen_tcp:close(Socket);
+        {undefined, TarSocket} ->
+            gen_tcp:close(TarSocket);
+        {_S, _TS} ->
+            gen_tcp:close(Socket),
+            gen_tcp:close(TarSocket)
+    end,
     ok.
 
 code_change(_OldVsn, StateName, State, _Extra) ->

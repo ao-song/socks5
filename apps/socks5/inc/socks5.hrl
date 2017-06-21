@@ -50,7 +50,7 @@
 
 %% Helper macro for declaring children of supervisor
 -define(CHILD(I, Type, Arg), 
-        {I, {I, start_link, Arg}, permanent, infinity, Type, [I]}).
+        {I, {I, start_link, Arg}, temporary, infinity, Type, [I]}).
 
 -define(LOG(A1), io:format(A1)).
 -define(LOG(A1,A2), io:format(A1,A2)).
