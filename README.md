@@ -10,7 +10,7 @@ Build and Run
     $ ./rebar3 shell
     
 
-Contribution are welcome! :-D
+Contribution is welcome! :-D
 
 todo:
 
