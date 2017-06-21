@@ -1,7 +1,7 @@
 socks5
 =====
 
-An OTP application
+A socks5 proxy implemented in erlang
 
 Build
 -----
@@ -10,7 +10,7 @@ Build
     $ ./rebar3 shell
     
 
-In construction, comments and contribution are welcome! :-D
+Contribution are welcome! :-D
 
 todo:
 
