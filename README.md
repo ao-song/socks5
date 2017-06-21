@@ -1,7 +1,7 @@
 socks5
 =====
 
-A socks5 proxy implemented in erlang, tested with firefox. As it works on session layer, HTTP and HTTPS are supported.
+A socks5 proxy implemented in erlang, tested with firefox. As it performs at session layer, HTTP and HTTPS are supported.
 
 Build and Run
 -----
