@@ -20,10 +20,10 @@ Here we go!
 Todo:
 -----
 
-- Code optimization
-- UDP support
-- authentication protocols support
-- message encryption
-- bind
+- []Code optimization
+- []UDP support
+- []authentication protocols support
+- []message encryption
+- []bind
 
 Contribution is welcome!

@@ -33,7 +33,7 @@ RELEASE_ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 # Make the value available to variable substitution calls below
 export REL_NAME="socks5"
 REL_VSN="0.1.0"
-ERTS_VSN="7.3"
+ERTS_VSN="8.2.1"
 CODE_LOADING_MODE="${CODE_LOADING_MODE:-embedded}"
 REL_DIR="$RELEASE_ROOT_DIR/releases/$REL_VSN"
 ERL_OPTS=""
