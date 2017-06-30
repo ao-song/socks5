@@ -26,4 +26,4 @@ Todo:
 - [ ] message encryption
 - [ ] bind
 
-Contribution is welcome!
+Contributions welcome!
