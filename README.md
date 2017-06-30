@@ -11,7 +11,7 @@ On the terminal of proxy host run the commands below
     $ ./rebar3 release
     $ ./rebar3 shell
 
-Config your browser or other client with the IP of the proxy and port 1080.
+Config your browser or other socks5 client with the address of proxy and port 1080.
 
 Here we go!
 
