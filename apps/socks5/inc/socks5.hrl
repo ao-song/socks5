@@ -53,29 +53,15 @@
         {I, {I, start_link, Arg}, temporary, infinity, Type, [I]}).
 
 -define(LOG(A1), io:format(A1)).
--define(LOG(A1,A2), io:format(A1,A2)).
+-define(LOG(A1, A2), io:format(A1, A2)).
 
 
 %% Record
--record(client_state, 
-        {
-         socket :: any(),
-         method :: integer(),
-         bound_addr :: tuple(),
-         bound_port :: integer()
-        }).
-
 
 -record(listener_state,
        {
         listener
        }).
-
--record(server_state,
-        {
-         listener,
-         socket
-        }).
 
 -record(worker_state,
         {

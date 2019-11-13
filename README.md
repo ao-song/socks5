@@ -25,5 +25,4 @@ Todo:
 - [ ] authentication protocols support
 - [ ] message encryption
 - [ ] bind
-
-Contributions welcome!
+- [ ] replace fsm to statem as erlang improvement.

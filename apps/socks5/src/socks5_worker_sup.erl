@@ -24,7 +24,7 @@ add_worker(Socket) ->
     {ok, Child} = supervisor:start_child(?MODULE, []),
     ok = gen_tcp:controlling_process(Socket, Child),
     socks5_worker:set_socket(Child, Socket).
-    
+
 
 %% ===================================================================
 %% Supervisor callbacks
