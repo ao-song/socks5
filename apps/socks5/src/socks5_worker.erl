@@ -15,15 +15,14 @@
          set_socket/2]).
 
 %% gen_statem callbacks
--export([
-         callback_mode/0,
+-export([callback_mode/0,
          init/1,
          format_status/2,
          handle_event/4,
          terminate/3,
-         code_change/4
-        ]).
+         code_change/4]).
 
+%% states
 -export(['WAIT_FOR_SOCKET'/3,
          'WAIT_FOR_AUTH'/3,
          'WAIT_FOR_CONNECT'/3,
