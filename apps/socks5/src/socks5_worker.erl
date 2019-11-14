@@ -50,10 +50,13 @@
 
 -define(NMETHODS, 1).
 
+%% Authentication methods
+%% X'03'~X'7F' IANA assigned
+%% X'80'~X'FE' reserved for private methods
 -define(NO_AUTHENTICATION_REQUIRED, 16#00).
--define(GSSAPI, 16#01).
--define(USERNAME_PASSWORD, 16#02).
--define(NO_ACCEPTABLE_METHODS, 16#ff).
+-define(GSSAPI,                     16#01).
+-define(USERNAME_PASSWORD,          16#02).
+-define(NO_ACCEPTABLE_METHODS,      16#ff).
 
 -define(CONNECT, 16#01).
 -define(BIND, 16#02).
@@ -72,6 +75,10 @@
 -define(TTL_EXPIRED, 16#06).
 -define(CMD_NOT_SUPPORTED, 16#07).
 -define(ATYP_NOT_SUPPORTED, 16#08).
+
+-define(UBYTE, 8/unsigned-integer).
+-define(USHORT, 16/unsigned-integer).
+-define(UINT, 32/unsigned-integer).
 
 %% Record
 -record(worker_state,
@@ -177,33 +184,36 @@ format_status(_Opt, [_PDict, State, Data]) ->
 %%                   {stop_and_reply, Reason, Replies, NewData}
 %% @end
 %%--------------------------------------------------------------------
-'WAIT_FOR_SOCKET'(_EventType, {socket_ready, Socket}, _State) when is_port(Socket) ->
+'WAIT_FOR_SOCKET'(_EventType, {socket_ready, Socket}, _State) ->
     inet:setopts(Socket, ?SOCK_SERVER_OPTIONS),
     {next_state, 'WAIT_FOR_AUTH', #worker_state{socket = Socket}};
 'WAIT_FOR_SOCKET'(_EventType, Other, State) ->
-    ?LOG("State: 'WAIT_FOR_SOCKET'. Unexpected message: ~p\n", [Other]),
+    ?LOG("State: 'WAIT_FOR_SOCKET'. Unexpected message: ~p~n", [Other]),
     {next_state, 'WAIT_FOR_SOCKET', State}.    
 
 %% receive the method negotiation request
-'WAIT_FOR_AUTH'(_EventType, {bin, <<?SOCKS_VERSION:8, 
-                        ?NMETHODS:8, 
-                        ?NO_AUTHENTICATION_REQUIRED:8>>}, 
+'WAIT_FOR_AUTH'(_EventType, {bin, <<?SOCKS_VERSION:?UBYTE,
+                                    ?NMETHODS:?UBYTE,
+                                    ?NO_AUTHENTICATION_REQUIRED:?UBYTE>>},
                 #worker_state{socket = Socket,
                               auth_method = undefined} = State) ->
-    {ok, Method} = handle_request(auth_method_negotiation, 
+    {ok, Method} = handle_request(auth_method_negotiation,
                                   {Socket, ?NO_AUTHENTICATION_REQUIRED}),
-    {next_state, 'WAIT_FOR_CONNECT', State#worker_state{auth_method = Method,
-                                                        authed_client = true}}.
+    {next_state, 'WAIT_FOR_CONNECT',
+     State#worker_state{auth_method = Method, authed_client = true}}.
 
-'WAIT_FOR_CONNECT'(_EventType, {bin, <<?SOCKS_VERSION:8, 
-                           ?CONNECT:8, 
-                           ?RSV:8, 
-                           ?DOMAINNAME:8, 
-                           Len:8, 
-                           Hostname:Len/binary, DstPort:16>>}, 
-                #worker_state{socket = Socket, 
-                              authed_client = true} = State) ->
-    case handle_request(connect, {Socket, binary_to_list(Hostname), DstPort}) of
+'WAIT_FOR_CONNECT'(_EventType, {bin, <<?SOCKS_VERSION:?UBYTE,
+                                       ?CONNECT:?UBYTE, 
+                                       ?RSV:?UBYTE, 
+                                       ?DOMAINNAME:?UBYTE, 
+                                       Len:?UBYTE,
+                                       Hostname:Len/binary,
+                                       DstPort:?USHORT>>},
+                   #worker_state{socket = Socket, 
+                                 authed_client = true} = State) ->
+    case handle_request(connect,
+                        {Socket, binary_to_list(Hostname),
+                        DstPort}) of
         {ok, DstSocket} ->
             {next_state, 
              'WAIT_FOR_DATA', 
@@ -212,14 +222,15 @@ format_status(_Opt, [_PDict, State, Data]) ->
         {error, _Reason} ->
             {next_state, 'WAIT_FOR_CONNECT', State}
     end;  
-'WAIT_FOR_CONNECT'(_EventType, {bin, <<?SOCKS_VERSION:8, 
-                           ?CONNECT:8, 
-                           ?RSV:8, 
-                           ?ATYP_IPV4:8, 
-                           A:8, B:8, C:8, D:8, 
-                           DstPort:16>>}, 
-                #worker_state{socket = Socket, 
-                              authed_client = true} = State) ->
+'WAIT_FOR_CONNECT'(_EventType,
+                   {bin, <<?SOCKS_VERSION:?UBYTE, 
+                           ?CONNECT:?UBYTE,
+                           ?RSV:?UBYTE,
+                           ?ATYP_IPV4:?UBYTE,
+                           A:?UBYTE, B:?UBYTE, C:?UBYTE, D:?UBYTE,
+                           DstPort:?USHORT>>}, 
+                   #worker_state{socket = Socket, 
+                                 authed_client = true} = State) ->
     case handle_request(connect, {Socket, {A,B,C,D}, DstPort}) of
         {ok, DstSocket} ->
             {next_state, 
@@ -229,14 +240,16 @@ format_status(_Opt, [_PDict, State, Data]) ->
         {error, _Reason} ->
             {next_state, 'WAIT_FOR_CONNECT', State}
     end;    
-'WAIT_FOR_CONNECT'(_EventType, {bin, <<?SOCKS_VERSION:8, 
-                           ?CONNECT:8, 
-                           ?RSV:8, 
-                           ?ATYP_IPV6:8, 
-                           A:16, B:16, C:16, D:16, E:16, F:16, G:16, H:16,
-                           DstPort:16>>}, 
-                #worker_state{socket = Socket,
-                              authed_client = true} = State) ->
+'WAIT_FOR_CONNECT'(_EventType, 
+                   {bin, <<?SOCKS_VERSION:?UBYTE, 
+                           ?CONNECT:?UBYTE, 
+                           ?RSV:?UBYTE, 
+                           ?ATYP_IPV6:?UBYTE, 
+                           A:?USHORT, B:?USHORT, C:?USHORT, D:?USHORT,
+                           E:?USHORT, F:?USHORT, G:?USHORT, H:?USHORT,
+                           DstPort:?USHORT>>},
+                   #worker_state{socket = Socket,
+                                 authed_client = true} = State) ->
     case handle_request(connect, {Socket, {A,B,C,D,E,F,G,H}, DstPort}) of
         {ok, DstSocket} ->
             {next_state, 
@@ -248,10 +261,12 @@ format_status(_Opt, [_PDict, State, Data]) ->
     end.
 
 
-'WAIT_FOR_DATA'(_EventType, {toS, Data}, #worker_state{target_socket=Socket} = State) ->
+'WAIT_FOR_DATA'(_EventType, {toS, Data},
+                #worker_state{target_socket=Socket} = State) ->
     gen_tcp:send(Socket, Data),
     {next_state, 'WAIT_FOR_DATA', State};
-'WAIT_FOR_DATA'(_EventType, {toC, Data}, #worker_state{socket=Socket} = State) ->
+'WAIT_FOR_DATA'(_EventType, {toC, Data},
+                #worker_state{socket=Socket} = State) ->
     gen_tcp:send(Socket, Data),
     {next_state, 'WAIT_FOR_DATA', State};
 'WAIT_FOR_DATA'(_EventType, timeout, State) ->
@@ -289,21 +304,21 @@ handle_event(EventType, {socket_ready, Socket},
     ?SERVER:StateName(EventType, {socket_ready, Socket}, State);
 handle_event(EventType, {tcp, Socket, Data},
             'WAIT_FOR_AUTH' = StateName, State) ->
-    inet:setopts(Socket, [{active, once}]),
+    reset_socket(Socket),
     ?SERVER:StateName(EventType, {bin, Data}, State);
 handle_event(EventType, {tcp, Socket, Data},
              'WAIT_FOR_CONNECT' = StateName, State) ->
-    inet:setopts(Socket, [{active, once}]),
+    reset_socket(Socket),
     ?SERVER:StateName(EventType, {bin, Data}, State);    
 handle_event(EventType, {tcp, Socket, Data},
              'WAIT_FOR_DATA' = StateName,
              #worker_state{socket=Socket} = State) ->
-    inet:setopts(Socket, [{active, once}]),
+    reset_socket(Socket),
     ?SERVER:StateName(EventType, {toS, Data}, State);
 handle_event(EventType, {tcp, Socket, Data},
              'WAIT_FOR_DATA'=StateName, 
              #worker_state{target_socket=Socket} = State) ->
-    inet:setopts(Socket, [{active, once}]),
+    reset_socket(Socket),
     ?SERVER:StateName(EventType, {toC, Data}, State);
 handle_event(_EventType, {tcp_closed, Socket}, _StateName,
             #worker_state{socket=Socket} = State) ->
@@ -362,28 +377,29 @@ code_change(_OldVsn, State, Data, _Extra) ->
 %%%===================================================================
 handle_request(auth_method_negotiation, 
                {Socket, ?NO_AUTHENTICATION_REQUIRED}) ->
-    ok = gen_tcp:send(Socket, 
-                      <<
-                        ?SOCKS_VERSION:8, 
-                        ?NO_AUTHENTICATION_REQUIRED:8
-                      >>),
+    ok = gen_tcp:send(Socket,
+                      <<?SOCKS_VERSION:?UBYTE,
+                        ?NO_AUTHENTICATION_REQUIRED:?UBYTE>>),
     {ok, ?NO_AUTHENTICATION_REQUIRED};
 handle_request(connect, {Socket, DstAddr, DstPort}) ->
     case gen_tcp:connect(DstAddr, DstPort, ?SOCK_SERVER_OPTIONS) of
         {ok, DstSocket} ->
-            gen_tcp:send(Socket, <<?SOCKS_VERSION:8, 
-                                   ?SUCCEEDED:8, 
-                                   ?RSV:8, 
-                                   ?ATYP_IPV4:8, 
-                                   0:32,
-                                   0:16>>),
+            gen_tcp:send(Socket, <<?SOCKS_VERSION:?UBYTE, 
+                                   ?SUCCEEDED:?UBYTE, 
+                                   ?RSV:?UBYTE, 
+                                   ?ATYP_IPV4:?UBYTE, 
+                                   0:?UINT,
+                                   0:?USHORT>>),
             {ok, DstSocket};
         {error, Reason} ->
             ?LOG("Connect to target host error: ~p~n", [Reason]),
-            gen_tcp:send(Socket, <<?SOCKS_VERSION:8,
-                                   ?GENERAL_SOCKS_SERVER_FAILURE:8,
-                                   ?RSV:8,
-                                   0:32,
-                                   0:16>>),
+            gen_tcp:send(Socket, <<?SOCKS_VERSION:?UBYTE,
+                                   ?GENERAL_SOCKS_SERVER_FAILURE:?UBYTE,
+                                   ?RSV:?UBYTE,
+                                   0:?UINT,
+                                   0:?USHORT>>),
             {error, Reason}
     end.
+
+reset_socket(Socket) ->
+    inet:setopts(Socket, [{active, once}]).

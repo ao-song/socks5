@@ -22,7 +22,6 @@ Todo:
 
 - [ ] Code optimization
 - [ ] UDP support
-- [ ] authentication protocols support
+- [ ] GSSAPI must and username/password impl
 - [ ] message encryption
 - [ ] bind
-- [ ] replace fsm to statem as erlang improvement.
