@@ -1,6 +1,0 @@
-[{release,"socks5","0.1.0","8.2.1",
-          [{kernel,"5.1.1","./lib/kernel-5.1.1"},
-           {stdlib,"3.2","./lib/stdlib-3.2"},
-           {socks5,"0.1.0","./lib/socks5-0.1.0"},
-           {sasl,"3.0.2","./lib/sasl-3.0.2"}],
-          permanent}].

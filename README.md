@@ -1,9 +1,11 @@
 socks5
 =====
 
-A socks5 proxy partially implemented in erlang, tested with firefox.
+An experimental socks5 proxy implemented in erlang, tested with firefox.
 
-Build and Run
+Following [rfc1928](https://datatracker.ietf.org/doc/html/rfc1928) but not fully implemeted yet!
+
+Want a try
 -----
 
 On the terminal of proxy host run the commands below
@@ -15,7 +17,6 @@ Config your browser or other socks5 client with the address of proxy and port 10
 
 Here we go!
 
-(There is a socks5 client implemented in test folder, just for your reference!)
 
 Todo:
 -----

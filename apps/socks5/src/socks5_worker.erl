@@ -18,7 +18,6 @@
 -export([callback_mode/0,
          init/1,
          format_status/2,
-         handle_event/4,
          terminate/3,
          code_change/4]).
 
@@ -90,6 +89,8 @@
          bind = false,
          target_socket
         }).
+
+-define(HANDLE_COMMON, ?FUNCTION_NAME(T, C, D) -> handle_common(T, C, D)).
 
 %%%===================================================================
 %%% API
@@ -184,154 +185,127 @@ format_status(_Opt, [_PDict, State, Data]) ->
 %%                   {stop_and_reply, Reason, Replies, NewData}
 %% @end
 %%--------------------------------------------------------------------
-'WAIT_FOR_SOCKET'(_EventType, {socket_ready, Socket}, _State) ->
+'WAIT_FOR_SOCKET'(cast, {socket_ready, Socket}, _State) ->
     inet:setopts(Socket, ?SOCK_SERVER_OPTIONS),
     {next_state, 'WAIT_FOR_AUTH', #worker_state{socket = Socket}};
 'WAIT_FOR_SOCKET'(_EventType, Other, State) ->
     ?LOG("State: 'WAIT_FOR_SOCKET'. Unexpected message: ~p~n", [Other]),
-    {next_state, 'WAIT_FOR_SOCKET', State}.    
+    {next_state, 'WAIT_FOR_SOCKET', State};
+?HANDLE_COMMON.
 
 %% receive the method negotiation request
-'WAIT_FOR_AUTH'(_EventType, {bin, <<?SOCKS_VERSION:?UBYTE,
-                                    ?NMETHODS:?UBYTE,
-                                    ?NO_AUTHENTICATION_REQUIRED:?UBYTE>>},
+'WAIT_FOR_AUTH'(info, {tcp, Socket, <<?SOCKS_VERSION:?UBYTE,
+                                      ?NMETHODS:?UBYTE,
+                                      ?NO_AUTHENTICATION_REQUIRED:?UBYTE>>},
                 #worker_state{socket = Socket,
                               auth_method = undefined} = State) ->
+    reset_socket(Socket),
     {ok, Method} = handle_request(auth_method_negotiation,
                                   {Socket, ?NO_AUTHENTICATION_REQUIRED}),
     {next_state, 'WAIT_FOR_CONNECT',
-     State#worker_state{auth_method = Method, authed_client = true}}.
+     State#worker_state{auth_method = Method, authed_client = true}};
+?HANDLE_COMMON.
 
-'WAIT_FOR_CONNECT'(_EventType, {bin, <<?SOCKS_VERSION:?UBYTE,
-                                       ?CONNECT:?UBYTE, 
-                                       ?RSV:?UBYTE, 
-                                       ?DOMAINNAME:?UBYTE, 
-                                       Len:?UBYTE,
-                                       Hostname:Len/binary,
-                                       DstPort:?USHORT>>},
-                   #worker_state{socket = Socket, 
+'WAIT_FOR_CONNECT'(info, {tcp, Socket, <<?SOCKS_VERSION:?UBYTE,
+                                         ?CONNECT:?UBYTE,
+                                         ?RSV:?UBYTE,
+                                         ?DOMAINNAME:?UBYTE,
+                                         Len:?UBYTE,
+                                         Hostname:Len/binary,
+                                         DstPort:?USHORT>>},
+                   #worker_state{socket = Socket,
                                  authed_client = true} = State) ->
+    reset_socket(Socket),
     case handle_request(connect,
                         {Socket, binary_to_list(Hostname),
                         DstPort}) of
         {ok, DstSocket} ->
-            {next_state, 
-             'WAIT_FOR_DATA', 
+            {next_state,
+             'WAIT_FOR_DATA',
              State#worker_state{connect = true,
                                 target_socket = DstSocket}};
         {error, _Reason} ->
             {next_state, 'WAIT_FOR_CONNECT', State}
-    end;  
-'WAIT_FOR_CONNECT'(_EventType,
-                   {bin, <<?SOCKS_VERSION:?UBYTE, 
-                           ?CONNECT:?UBYTE,
-                           ?RSV:?UBYTE,
-                           ?ATYP_IPV4:?UBYTE,
-                           A:?UBYTE, B:?UBYTE, C:?UBYTE, D:?UBYTE,
-                           DstPort:?USHORT>>}, 
-                   #worker_state{socket = Socket, 
-                                 authed_client = true} = State) ->
-    case handle_request(connect, {Socket, {A,B,C,D}, DstPort}) of
-        {ok, DstSocket} ->
-            {next_state, 
-             'WAIT_FOR_DATA', 
-             State#worker_state{connect = true,
-                                target_socket = DstSocket}};
-        {error, _Reason} ->
-            {next_state, 'WAIT_FOR_CONNECT', State}
-    end;    
-'WAIT_FOR_CONNECT'(_EventType, 
-                   {bin, <<?SOCKS_VERSION:?UBYTE, 
-                           ?CONNECT:?UBYTE, 
-                           ?RSV:?UBYTE, 
-                           ?ATYP_IPV6:?UBYTE, 
-                           A:?USHORT, B:?USHORT, C:?USHORT, D:?USHORT,
-                           E:?USHORT, F:?USHORT, G:?USHORT, H:?USHORT,
-                           DstPort:?USHORT>>},
+    end;
+'WAIT_FOR_CONNECT'(info,
+                   {tcp, Socket, <<?SOCKS_VERSION:?UBYTE,
+                                   ?CONNECT:?UBYTE,
+                                   ?RSV:?UBYTE,
+                                   ?ATYP_IPV4:?UBYTE,
+                                   A:?UBYTE, B:?UBYTE, C:?UBYTE, D:?UBYTE,
+                                   DstPort:?USHORT>>},
                    #worker_state{socket = Socket,
                                  authed_client = true} = State) ->
-    case handle_request(connect, {Socket, {A,B,C,D,E,F,G,H}, DstPort}) of
+    reset_socket(Socket),
+    case handle_request(connect, {Socket, {A,B,C,D}, DstPort}) of
         {ok, DstSocket} ->
-            {next_state, 
-             'WAIT_FOR_DATA', 
+            {next_state,
+             'WAIT_FOR_DATA',
              State#worker_state{connect = true,
                                 target_socket = DstSocket}};
         {error, _Reason} ->
             {next_state, 'WAIT_FOR_CONNECT', State}
-    end.
+    end;
+'WAIT_FOR_CONNECT'(info,
+                   {tcp, Socket, <<?SOCKS_VERSION:?UBYTE,
+                                   ?CONNECT:?UBYTE,
+                                   ?RSV:?UBYTE,
+                                   ?ATYP_IPV6:?UBYTE,
+                                   A:?USHORT, B:?USHORT, C:?USHORT, D:?USHORT,
+                                   E:?USHORT, F:?USHORT, G:?USHORT, H:?USHORT,
+                                   DstPort:?USHORT>>},
+                   #worker_state{socket = Socket,
+                                 authed_client = true} = State) ->
+    reset_socket(Socket),
+    case handle_request(connect, {Socket, {A,B,C,D,E,F,G,H}, DstPort}) of
+        {ok, DstSocket} ->
+            {next_state,
+             'WAIT_FOR_DATA',
+             State#worker_state{connect = true,
+                                target_socket = DstSocket}};
+        {error, _Reason} ->
+            {next_state, 'WAIT_FOR_CONNECT', State}
+    end;
+?HANDLE_COMMON.
 
 
-'WAIT_FOR_DATA'(_EventType, {toS, Data},
+'WAIT_FOR_DATA'(info, {tcp, CSocket, Data},
                 #worker_state{target_socket=Socket} = State) ->
+    reset_socket(CSocket),
     gen_tcp:send(Socket, Data),
     {next_state, 'WAIT_FOR_DATA', State};
-'WAIT_FOR_DATA'(_EventType, {toC, Data},
+'WAIT_FOR_DATA'(info, {tcp, TSocket, Data},
                 #worker_state{socket=Socket} = State) ->
+    reset_socket(TSocket),
     gen_tcp:send(Socket, Data),
     {next_state, 'WAIT_FOR_DATA', State};
 'WAIT_FOR_DATA'(_EventType, timeout, State) ->
     ?LOG("Client connection timeout. ~n"),
-    {stop, normal, State}.
+    {stop, normal, State};
+?HANDLE_COMMON.
 
 %%--------------------------------------------------------------------
 %% @private
 %% @doc
+%% Handle comment events for all states.
 %%
-%% If callback_mode is handle_event_function, then whenever a
-%% gen_statem receives an event from call/2, cast/2, or as a normal
-%% process message, this function is called.
-%%
-%% @spec handle_event(Event, StateName, State) ->
-%%                   {next_state, NextState, NewData} |
-%%                   {next_state, NextState, NewData, Actions} |
-%%                   {keep_state, NewData} |
-%%                   {keep_state, NewData, Actions} |
-%%                   keep_state_and_data |
-%%                   {keep_state_and_data, Actions} |
-%%                   {repeat_state, NewData} |
-%%                   {repeat_state, NewData, Actions} |
-%%                   repeat_state_and_data |
-%%                   {repeat_state_and_data, Actions} |
-%%                   stop |
-%%                   {stop, Reason} |
-%%                   {stop, Reason, NewData} |
-%%                   {stop_and_reply, Reason, Replies} |
-%%                   {stop_and_reply, Reason, Replies, NewData}
 %% @end
 %%--------------------------------------------------------------------
-handle_event(EventType, {socket_ready, Socket},
-             'WAIT_FOR_SOCKET' = StateName, State) ->
-    ?SERVER:StateName(EventType, {socket_ready, Socket}, State);
-handle_event(EventType, {tcp, Socket, Data},
-            'WAIT_FOR_AUTH' = StateName, State) ->
-    reset_socket(Socket),
-    ?SERVER:StateName(EventType, {bin, Data}, State);
-handle_event(EventType, {tcp, Socket, Data},
-             'WAIT_FOR_CONNECT' = StateName, State) ->
-    reset_socket(Socket),
-    ?SERVER:StateName(EventType, {bin, Data}, State);    
-handle_event(EventType, {tcp, Socket, Data},
-             'WAIT_FOR_DATA' = StateName,
-             #worker_state{socket=Socket} = State) ->
-    reset_socket(Socket),
-    ?SERVER:StateName(EventType, {toS, Data}, State);
-handle_event(EventType, {tcp, Socket, Data},
-             'WAIT_FOR_DATA'=StateName, 
-             #worker_state{target_socket=Socket} = State) ->
-    reset_socket(Socket),
-    ?SERVER:StateName(EventType, {toC, Data}, State);
-handle_event(_EventType, {tcp_closed, Socket}, _StateName,
+
+handle_common(_EventType, {tcp_closed, Socket},
             #worker_state{socket=Socket} = State) ->
     ?LOG("Client disconnected. ~n"),
     {stop, normal, State};
-handle_event(_EventType, {tcp_closed, Socket}, _StateName,
+handle_common(_EventType, {tcp_closed, Socket},
             #worker_state{target_socket=Socket} = State) ->
     ?LOG("Server disconnected. ~n"),
     {stop, normal, State};
-handle_event(_EventType, _Info, StateName, State) ->
-    {noreply, StateName, State};
-handle_event({call, From}, _Msg, State, Data) ->
-    {next_state, State, Data, [{reply, From, ok}]}.
+handle_common({call, From}, _Msg, _Data) ->
+    {keep_state_and_data, [{reply, From, ok}]};
+handle_common(EventType, Event, _Data) ->
+    ?LOG("Unexpected event: ~p:~p ~n", [EventType, Event]),
+    keep_state_and_data.
+
 
 %%--------------------------------------------------------------------
 %% @private
@@ -349,7 +323,7 @@ terminate(_Reason, _StateName,
                         target_socket=TarSocket}) ->
     case {Socket, TarSocket} of
         {undefined, undefined} -> ok;
-        {Socket, undefined} -> 
+        {Socket, undefined} ->
             gen_tcp:close(Socket);
         {undefined, TarSocket} ->
             gen_tcp:close(TarSocket);
@@ -375,7 +349,7 @@ code_change(_OldVsn, State, Data, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
-handle_request(auth_method_negotiation, 
+handle_request(auth_method_negotiation,
                {Socket, ?NO_AUTHENTICATION_REQUIRED}) ->
     ok = gen_tcp:send(Socket,
                       <<?SOCKS_VERSION:?UBYTE,
@@ -384,10 +358,10 @@ handle_request(auth_method_negotiation,
 handle_request(connect, {Socket, DstAddr, DstPort}) ->
     case gen_tcp:connect(DstAddr, DstPort, ?SOCK_SERVER_OPTIONS) of
         {ok, DstSocket} ->
-            gen_tcp:send(Socket, <<?SOCKS_VERSION:?UBYTE, 
-                                   ?SUCCEEDED:?UBYTE, 
-                                   ?RSV:?UBYTE, 
-                                   ?ATYP_IPV4:?UBYTE, 
+            gen_tcp:send(Socket, <<?SOCKS_VERSION:?UBYTE,
+                                   ?SUCCEEDED:?UBYTE,
+                                   ?RSV:?UBYTE,
+                                   ?ATYP_IPV4:?UBYTE,
                                    0:?UINT,
                                    0:?USHORT>>),
             {ok, DstSocket};
