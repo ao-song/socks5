@@ -23,19 +23,23 @@
 
 %% Macro
 -define(SERVER, ?MODULE).
+
 -define(SOCK_OPTIONS,
-        [{active, false},
-         binary,
+        [binary,
+         {active, true},
          {packet, 0},
          {nodelay, true},
          {reuseaddr, true}]).
+
 -define(DEFAULT_PORT, 1080).
+
 -define(LOG(A1, A2), io:format(A1, A2)).
 
 %% Record
--record(listener_state,
+-record(state,
        {
-        listener
+        listener,
+        config
        }).
 
 %%%===================================================================
@@ -50,7 +54,7 @@
 %% @end
 %%--------------------------------------------------------------------
 start_link() ->
-    gen_server:start_link({local, ?SERVER}, ?MODULE, [?DEFAULT_PORT], []).
+    gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
 
 %%%===================================================================
 %%% gen_server callbacks
@@ -67,10 +71,20 @@ start_link() ->
 %%                     {stop, Reason}
 %% @end
 %%--------------------------------------------------------------------
-init([Port]) ->
-    case gen_tcp:listen(Port, ?SOCK_OPTIONS) of
-        {ok, ListenSocket} ->            
-            {ok, accept(#listener_state{listener = ListenSocket})};
+init([]) ->
+    Config =
+    case socks5_utils:get_config() of
+        {ok, ConfMap} ->
+            ConfMap;
+        {error, _Reason} ->
+            #{socks5_port => ?DEFAULT_PORT}
+    end,
+
+    case gen_tcp:listen(maps:get(socks5_port, Config, ?DEFAULT_PORT),
+                        ?SOCK_OPTIONS) of
+        {ok, ListenSocket} ->
+            {ok, accept(#state{listener = ListenSocket,
+                               config = Config})};
         {error, Reason} ->
             ?LOG("Server: listen error, ~p~n.", [Reason]),
             {stop, Reason}
@@ -133,7 +147,7 @@ handle_info(_Info, State) ->
 %% @spec terminate(Reason, State) -> void()
 %% @end
 %%--------------------------------------------------------------------
-terminate(_Reason, #listener_state{listener = ListenSocket}) ->
+terminate(_Reason, #state{listener = ListenSocket}) ->
     gen_tcp:close(ListenSocket),
     ok.
 
@@ -151,7 +165,7 @@ code_change(_OldVsn, State, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
-accept(#listener_state{listener = ListenSocket} = State) ->
+accept(#state{listener = ListenSocket} = State) ->
     proc_lib:spawn(fun() -> accept_loop(ListenSocket) end),
     State.
 
