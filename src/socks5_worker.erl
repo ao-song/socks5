@@ -10,6 +10,10 @@
 
 -behaviour(gen_statem).
 
+-include("socks5.hrl").
+
+-include_lib("kernel/include/logger.hrl").
+
 %% API
 -export([start_link/0,
          set_socket/2]).
@@ -29,8 +33,6 @@
 
 %% Macro
 -define(SERVER, ?MODULE).
--define(LOG(A1), io:format(A1)).
--define(LOG(A1, A2), io:format(A1, A2)).
 -define(SOCK_SERVER_OPTIONS,
         [{active, once},
          binary,
@@ -38,49 +40,12 @@
          {nodelay, true},
          {reuseaddr, true}]).
 
--define(MAX_RESTART, 5).
--define(MAX_TIME, 60).
--define(DEFAULT_PORT, 1080).
-
--define(TIMEOUT, 60000).
-
--define(SOCKS_VERSION, 16#05).
--define(RSV, 16#00).
-
--define(NMETHODS, 1).
-
-%% Authentication methods
-%% X'03'~X'7F' IANA assigned
-%% X'80'~X'FE' reserved for private methods
--define(NO_AUTHENTICATION_REQUIRED, 16#00).
--define(GSSAPI,                     16#01).
--define(USERNAME_PASSWORD,          16#02).
--define(NO_ACCEPTABLE_METHODS,      16#ff).
-
--define(CONNECT, 16#01).
--define(BIND, 16#02).
--define(UDP_ASSOCIATE, 16#03).
-
--define(ATYP_IPV4, 16#01).
--define(DOMAINNAME, 16#03).
--define(ATYP_IPV6, 16#04).
-
--define(SUCCEEDED, 16#00).
--define(GENERAL_SOCKS_SERVER_FAILURE, 16#01).
--define(CONNECTION_NOT_ALLOWED, 16#02).
--define(NETWORK_UNREACHABLE, 16#03).
--define(HOST_UNREACHABLE, 16#04).
--define(CONNECTION_REFUSED, 16#05).
--define(TTL_EXPIRED, 16#06).
--define(CMD_NOT_SUPPORTED, 16#07).
--define(ATYP_NOT_SUPPORTED, 16#08).
-
--define(UBYTE, 8/unsigned-integer).
+-define(UBYTE,  8/unsigned-integer).
 -define(USHORT, 16/unsigned-integer).
--define(UINT, 32/unsigned-integer).
+-define(UINT,   32/unsigned-integer).
 
 %% Record
--record(worker_state,
+-record(state,
         {
          socket,
          auth_method,
@@ -90,7 +55,8 @@
          target_socket
         }).
 
--define(HANDLE_COMMON, ?FUNCTION_NAME(T, C, D) -> handle_common(T, C, D)).
+-define(HANDLE_COMMON,
+        ?FUNCTION_NAME(T, C, D) -> handle_common(T, C, D)).
 
 %%%===================================================================
 %%% API
@@ -144,7 +110,7 @@ callback_mode() ->
 %%--------------------------------------------------------------------
 init([]) ->
     process_flag(trap_exit, true),
-    {ok, 'WAIT_FOR_SOCKET', #worker_state{}}.
+    {ok, 'WAIT_FOR_SOCKET', #state{}}.
 
 %%--------------------------------------------------------------------
 %% @private
@@ -187,9 +153,9 @@ format_status(_Opt, [_PDict, State, Data]) ->
 %%--------------------------------------------------------------------
 'WAIT_FOR_SOCKET'(cast, {socket_ready, Socket}, _State) ->
     inet:setopts(Socket, ?SOCK_SERVER_OPTIONS),
-    {next_state, 'WAIT_FOR_AUTH', #worker_state{socket = Socket}};
+    {next_state, 'WAIT_FOR_AUTH', #state{socket = Socket}};
 'WAIT_FOR_SOCKET'(_EventType, Other, State) ->
-    ?LOG("State: 'WAIT_FOR_SOCKET'. Unexpected message: ~p~n", [Other]),
+    ?LOG_WARNING("State: 'WAIT_FOR_SOCKET'. Unexpected message: ~p", [Other]),
     {next_state, 'WAIT_FOR_SOCKET', State};
 ?HANDLE_COMMON.
 
@@ -197,13 +163,13 @@ format_status(_Opt, [_PDict, State, Data]) ->
 'WAIT_FOR_AUTH'(info, {tcp, Socket, <<?SOCKS_VERSION:?UBYTE,
                                       ?NMETHODS:?UBYTE,
                                       ?NO_AUTHENTICATION_REQUIRED:?UBYTE>>},
-                #worker_state{socket = Socket,
-                              auth_method = undefined} = State) ->
+                #state{socket = Socket,
+                       auth_method = undefined} = State) ->
     reset_socket(Socket),
     {ok, Method} = handle_request(auth_method_negotiation,
                                   {Socket, ?NO_AUTHENTICATION_REQUIRED}),
     {next_state, 'WAIT_FOR_CONNECT',
-     State#worker_state{auth_method = Method, authed_client = true}};
+     State#state{auth_method = Method, authed_client = true}};
 ?HANDLE_COMMON.
 
 'WAIT_FOR_CONNECT'(info, {tcp, Socket, <<?SOCKS_VERSION:?UBYTE,
@@ -213,17 +179,16 @@ format_status(_Opt, [_PDict, State, Data]) ->
                                          Len:?UBYTE,
                                          Hostname:Len/binary,
                                          DstPort:?USHORT>>},
-                   #worker_state{socket = Socket,
-                                 authed_client = true} = State) ->
+                   #state{socket = Socket,
+                          authed_client = true} = State) ->
     reset_socket(Socket),
     case handle_request(connect,
                         {Socket, binary_to_list(Hostname),
                         DstPort}) of
         {ok, DstSocket} ->
-            {next_state,
-             'WAIT_FOR_DATA',
-             State#worker_state{connect = true,
-                                target_socket = DstSocket}};
+            {next_state, 'WAIT_FOR_DATA',
+             State#state{connect = true,
+                         target_socket = DstSocket}};
         {error, _Reason} ->
             {next_state, 'WAIT_FOR_CONNECT', State}
     end;
@@ -234,15 +199,15 @@ format_status(_Opt, [_PDict, State, Data]) ->
                                    ?ATYP_IPV4:?UBYTE,
                                    A:?UBYTE, B:?UBYTE, C:?UBYTE, D:?UBYTE,
                                    DstPort:?USHORT>>},
-                   #worker_state{socket = Socket,
-                                 authed_client = true} = State) ->
+                   #state{socket = Socket,
+                          authed_client = true} = State) ->
     reset_socket(Socket),
     case handle_request(connect, {Socket, {A,B,C,D}, DstPort}) of
         {ok, DstSocket} ->
             {next_state,
              'WAIT_FOR_DATA',
-             State#worker_state{connect = true,
-                                target_socket = DstSocket}};
+             State#state{connect = true,
+                         target_socket = DstSocket}};
         {error, _Reason} ->
             {next_state, 'WAIT_FOR_CONNECT', State}
     end;
@@ -254,15 +219,15 @@ format_status(_Opt, [_PDict, State, Data]) ->
                                    A:?USHORT, B:?USHORT, C:?USHORT, D:?USHORT,
                                    E:?USHORT, F:?USHORT, G:?USHORT, H:?USHORT,
                                    DstPort:?USHORT>>},
-                   #worker_state{socket = Socket,
-                                 authed_client = true} = State) ->
+                   #state{socket = Socket,
+                          authed_client = true} = State) ->
     reset_socket(Socket),
     case handle_request(connect, {Socket, {A,B,C,D,E,F,G,H}, DstPort}) of
         {ok, DstSocket} ->
             {next_state,
              'WAIT_FOR_DATA',
-             State#worker_state{connect = true,
-                                target_socket = DstSocket}};
+             State#state{connect = true,
+                         target_socket = DstSocket}};
         {error, _Reason} ->
             {next_state, 'WAIT_FOR_CONNECT', State}
     end;
@@ -270,17 +235,17 @@ format_status(_Opt, [_PDict, State, Data]) ->
 
 
 'WAIT_FOR_DATA'(info, {tcp, CSocket, Data},
-                #worker_state{target_socket=Socket} = State) ->
+                #state{target_socket=Socket} = State) ->
     reset_socket(CSocket),
     gen_tcp:send(Socket, Data),
     {next_state, 'WAIT_FOR_DATA', State};
 'WAIT_FOR_DATA'(info, {tcp, TSocket, Data},
-                #worker_state{socket=Socket} = State) ->
+                #state{socket=Socket} = State) ->
     reset_socket(TSocket),
     gen_tcp:send(Socket, Data),
     {next_state, 'WAIT_FOR_DATA', State};
 'WAIT_FOR_DATA'(_EventType, timeout, State) ->
-    ?LOG("Client connection timeout. ~n"),
+    ?LOG_ERROR("Client connection timeout."),
     {stop, normal, State};
 ?HANDLE_COMMON.
 
@@ -293,17 +258,17 @@ format_status(_Opt, [_PDict, State, Data]) ->
 %%--------------------------------------------------------------------
 
 handle_common(_EventType, {tcp_closed, Socket},
-            #worker_state{socket=Socket} = State) ->
-    ?LOG("Client disconnected. ~n"),
+              #state{socket=Socket} = State) ->
+    ?LOG_INFO("Client disconnected."),
     {stop, normal, State};
 handle_common(_EventType, {tcp_closed, Socket},
-            #worker_state{target_socket=Socket} = State) ->
-    ?LOG("Server disconnected. ~n"),
+              #state{target_socket=Socket} = State) ->
+    ?LOG_INFO("Server disconnected."),
     {stop, normal, State};
 handle_common({call, From}, _Msg, _Data) ->
     {keep_state_and_data, [{reply, From, ok}]};
 handle_common(EventType, Event, _Data) ->
-    ?LOG("Unexpected event: ~p:~p ~n", [EventType, Event]),
+    ?LOG_ERROR("Unexpected event: ~p:~p", [EventType, Event]),
     keep_state_and_data.
 
 
@@ -319,8 +284,8 @@ handle_common(EventType, Event, _Data) ->
 %% @end
 %%--------------------------------------------------------------------
 terminate(_Reason, _StateName,
-          #worker_state{socket=Socket,
-                        target_socket=TarSocket}) ->
+          #state{socket=Socket,
+                 target_socket=TarSocket}) ->
     case {Socket, TarSocket} of
         {undefined, undefined} -> ok;
         {Socket, undefined} ->
@@ -366,7 +331,7 @@ handle_request(connect, {Socket, DstAddr, DstPort}) ->
                                    0:?USHORT>>),
             {ok, DstSocket};
         {error, Reason} ->
-            ?LOG("Connect to target host error: ~p~n", [Reason]),
+            ?LOG_ERROR("Connect to target host error: ~p", [Reason]),
             gen_tcp:send(Socket, <<?SOCKS_VERSION:?UBYTE,
                                    ?GENERAL_SOCKS_SERVER_FAILURE:?UBYTE,
                                    ?RSV:?UBYTE,

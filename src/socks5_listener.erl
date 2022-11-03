@@ -10,6 +10,8 @@
 
 -behaviour(gen_server).
 
+-include_lib("kernel/include/logger.hrl").
+
 %% API
 -export([start_link/0]).
 
@@ -32,8 +34,6 @@
          {reuseaddr, true}]).
 
 -define(DEFAULT_PORT, 1080).
-
--define(LOG(A1, A2), io:format(A1, A2)).
 
 %% Record
 -record(state,
@@ -86,7 +86,7 @@ init([]) ->
             {ok, accept(#state{listener = ListenSocket,
                                config = Config})};
         {error, Reason} ->
-            ?LOG("Server: listen error, ~p~n.", [Reason]),
+            ?LOG_ERROR("Server: listen error, ~p.", [Reason]),
             {stop, Reason}
     end.
 
