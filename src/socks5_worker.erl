@@ -44,6 +44,9 @@
 -define(USHORT, 16/unsigned-integer).
 -define(UINT,   32/unsigned-integer).
 
+-define(HANDLE_COMMON,
+        ?FUNCTION_NAME(T, C, D) -> handle_common(T, C, D)).
+
 %% Record
 -record(state,
         {
@@ -54,9 +57,6 @@
          bind = false,
          target_socket
         }).
-
--define(HANDLE_COMMON,
-        ?FUNCTION_NAME(T, C, D) -> handle_common(T, C, D)).
 
 %%%===================================================================
 %%% API
