@@ -1,0 +1,6 @@
+-sname socks5
+
+-setcookie socks5_cookie
+
++K true
++A30
