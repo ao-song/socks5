@@ -27,7 +27,8 @@
 
 %% states
 -export(['WAIT_FOR_SOCKET'/3,
-         'WAIT_FOR_AUTH'/3,
+         'AUTH_METHOD_NEG'/3,
+         'AUTH_CLIENT'/3,
          'WAIT_FOR_CONNECT'/3,
          'WAIT_FOR_DATA'/3]).
 
@@ -148,28 +149,53 @@ format_status(_Opt, [_PDict, State, Data]) ->
 %%--------------------------------------------------------------------
 'WAIT_FOR_SOCKET'(cast, {socket_ready, Socket}, _State) ->
     inet:setopts(Socket, ?SOCK_SERVER_OPTIONS),
-    {next_state, 'WAIT_FOR_AUTH', #state{socket = Socket}};
+    {next_state, 'AUTH_METHOD_NEG', #state{socket = Socket}};
 'WAIT_FOR_SOCKET'(_EventType, Other, State) ->
-    ?LOG_WARNING("State: 'WAIT_FOR_SOCKET'. Unexpected message: ~p", [Other]),
+    ?LOG_WARNING("State: 'WAIT_FOR_SOCKET'. "
+                 "Unexpected message: ~p", [Other]),
     {next_state, 'WAIT_FOR_SOCKET', State};
 ?HANDLE_COMMON.
 
 %% receive the method negotiation request
-'WAIT_FOR_AUTH'(info, {tcp, Socket, <<?SOCKS_VERSION:?UBYTE,
-                                      ?NMETHODS:?UBYTE,
-                                      ?NO_AUTHENTICATION_REQUIRED:?UBYTE>>},
+'AUTH_METHOD_NEG'(info, {tcp, Socket, <<?SOCKS_VERSION:?UBYTE,
+                                        MethodsNum:?UBYTE,
+                                        Methods:(MethodsNum*8)/binary>>},
                 #state{socket = Socket,
                        auth_method = undefined} = State) ->
     reset_socket(Socket),
-    {ok, Method} = handle_request(auth_method_negotiation,
-                                  {Socket, ?NO_AUTHENTICATION_REQUIRED}),
-    {next_state, 'WAIT_FOR_CONNECT',
-     State#state{auth_method = Method, authed_client = true}};
-'WAIT_FOR_AUTH'(info, {tcp, _Socket, <<?SOCKS_VERSION:?UBYTE,
-                                       ?NMETHODS:?UBYTE,
-                                       ?NO_ACCEPTABLE_METHODS:?UBYTE>>},
-                State) ->
-    {stop, normal, State};
+    Method = get_method(get_supported_methods(),
+                        get_methods(Methods, MethodsNum)),
+    handle_request(auth_negotiation, {Socket, Method}),
+    case Method of
+        ?NO_ACCEPTABLE_METHODS ->
+            ?LOG_INFO("No acceptable auth methods from client, "
+                      "close the connection."),
+            {stop, normal, State};
+        _ ->
+            {next_state, 'AUTH_CLIENT',
+             State#state{auth_method = Method}}
+    end;
+'AUTH_METHOD_NEG'(info, {tcp, Socket, Data}, _State) ->
+    reset_socket(Socket),
+    ?LOG_WARNING("Data ~p arrived in incorrect state! "
+                 "This message will be ignored", [Data]),
+    keep_state_and_data;
+?HANDLE_COMMON.
+
+%% TODO: GSSAPI must be supported,
+%%       Username/Password should be supported.
+'AUTH_CLIENT'(info, {tcp, Socket, AuthData},
+              #state{auth_method = AuthMethod} = State) ->
+    reset_socket(Socket),
+    case auth_client(AuthData, AuthMethod) of
+        ok ->
+            {next_state, 'WAIT_FOR_CONNECT',
+             State#state{authed_client = true}};
+        {error, Reason} ->
+            ?LOG_ERROR("Client authentication failed, "
+                       "close the connection! ~p", [Reason]),
+            {stop, normal, State}
+    end;
 ?HANDLE_COMMON.
 
 'WAIT_FOR_CONNECT'(info, {tcp, Socket, <<?SOCKS_VERSION:?UBYTE,
@@ -314,12 +340,9 @@ code_change(_OldVsn, State, Data, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
-handle_request(auth_method_negotiation,
-               {Socket, ?NO_AUTHENTICATION_REQUIRED}) ->
-    ok = gen_tcp:send(Socket,
-                      <<?SOCKS_VERSION:?UBYTE,
-                        ?NO_AUTHENTICATION_REQUIRED:?UBYTE>>),
-    {ok, ?NO_AUTHENTICATION_REQUIRED};
+handle_request(auth_negotiation, {Socket, Method}) ->
+    ok = gen_tcp:send(Socket, <<?SOCKS_VERSION:?UBYTE, Method:?UBYTE>>),
+    {ok, Method};
 handle_request(connect, {Socket, DstAddr, DstPort}) ->
     case gen_tcp:connect(DstAddr, DstPort, ?SOCK_SERVER_OPTIONS) of
         {ok, DstSocket} ->
@@ -342,3 +365,30 @@ handle_request(connect, {Socket, DstAddr, DstPort}) ->
 
 reset_socket(Socket) ->
     inet:setopts(Socket, [{active, once}]).
+
+get_methods(Methods, MethodsNum) ->
+    get_methods(Methods, MethodsNum, []).
+
+get_methods(_Methods, 0, MethodList) ->
+    MethodList;
+get_methods(<<Method:?UBYTE, MethodsLeft>>, MethodsNum, MethodList) ->
+    get_methods(MethodsLeft, MethodsNum-1, [Method | MethodList]).
+
+
+get_supported_methods() ->
+    [?GSSAPI, ?USERNAME_PASSWORD, ?NO_AUTHENTICATION_REQUIRED].
+
+get_method(_SupportedMethods, []) ->
+    ?NO_ACCEPTABLE_METHODS;
+get_method([], _MethodList) ->
+    ?NO_ACCEPTABLE_METHODS;
+get_method([M | SupportedMethods], MethodList) ->
+    case lists:member(M, MethodList) of
+        true ->
+            M;
+        false ->
+            get_method(SupportedMethods, MethodList)
+    end.
+
+auth_client(_AuthData, _AuthMethod) ->
+    ok.

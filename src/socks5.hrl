@@ -8,15 +8,14 @@
 
 
 %% Binary types
--define(UBYTE,  8/unsigned-integer).
--define(USHORT, 16/unsigned-integer).
--define(UINT,   32/unsigned-integer).
+-define(UBYTE,  8/unsigned-big-integer).
+-define(USHORT, 16/unsigned-big-integer).
+-define(UINT,   32/unsigned-big-integer).
 
 
 %% Socks5 definitions
 -define(SOCKS_VERSION,                16#05).
 -define(RSV,                          16#00).
--define(NMETHODS,                     1).
 %% Authentication methods
 %% X'03'~X'7F' IANA assigned
 %% X'80'~X'FE' reserved for private methods
