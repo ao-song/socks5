@@ -1,25 +1,15 @@
 socks5
 =====
+A toy project only implements part of [rfc1928](https://datatracker.ietf.org/doc/html/rfc1928) currently.
 
-Refactor reminder:
+Supported:
 -----
-1. logger refactor later
-2. add more logs
-3. worker socket management
-4. supervisor management revise
-5. logger config
-6. app config
-7. containerize app
+1. TCP connection and IPv6 target server
+2. NO AUTHENTICATION REQUIRED
 
 Todo:
 -----
-
-- [ ] Code optimization
 - [ ] UDP support
+- [ ] bind support
 - [ ] GSSAPI must and username/password impl
-- [ ] message encryption
-- [ ] bind
-
-~~An experimental socks5 proxy implemented in erlang, tested with firefox.~~
-
-~~Following [rfc1928](https://datatracker.ietf.org/doc/html/rfc1928) but not fully implemeted yet!~~
+- [ ] Client connction over tls/dtls

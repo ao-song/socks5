@@ -29,8 +29,8 @@
 -export(['WAIT_FOR_SOCKET'/3,
          'AUTH_METHOD_NEG'/3,
          'AUTH_CLIENT'/3,
-         'WAIT_FOR_CONNECT'/3,
-         'WAIT_FOR_DATA'/3]).
+         'SETUP_CONNECTION'/3,
+         'CONNECTED'/3]).
 
 %% Macro
 -define(SERVER, ?MODULE).
@@ -153,8 +153,7 @@ format_status(_Opt, [_PDict, State, Data]) ->
 'WAIT_FOR_SOCKET'(_EventType, Other, State) ->
     ?LOG_WARNING("State: 'WAIT_FOR_SOCKET'. "
                  "Unexpected message: ~p", [Other]),
-    {next_state, 'WAIT_FOR_SOCKET', State};
-?HANDLE_COMMON.
+    {next_state, 'WAIT_FOR_SOCKET', State}.
 
 %% receive the method negotiation request
 'AUTH_METHOD_NEG'(info, {tcp, Socket, <<?SOCKS_VERSION:?UBYTE,
@@ -189,7 +188,7 @@ format_status(_Opt, [_PDict, State, Data]) ->
     reset_socket(Socket),
     case auth_client(AuthData, AuthMethod) of
         ok ->
-            {next_state, 'WAIT_FOR_CONNECT',
+            {next_state, 'SETUP_CONNECTION',
              State#state{authed_client = true}};
         {error, Reason} ->
             ?LOG_ERROR("Client authentication failed, "
@@ -198,7 +197,7 @@ format_status(_Opt, [_PDict, State, Data]) ->
     end;
 ?HANDLE_COMMON.
 
-'WAIT_FOR_CONNECT'(info, {tcp, Socket, <<?SOCKS_VERSION:?UBYTE,
+'SETUP_CONNECTION'(info, {tcp, Socket, <<?SOCKS_VERSION:?UBYTE,
                                          ?CONNECT:?UBYTE,
                                          ?RSV:?UBYTE,
                                          ?DOMAINNAME:?UBYTE,
@@ -212,13 +211,13 @@ format_status(_Opt, [_PDict, State, Data]) ->
                         {Socket, binary_to_list(Hostname),
                         DstPort}) of
         {ok, DstSocket} ->
-            {next_state, 'WAIT_FOR_DATA',
+            {next_state, 'CONNECTED',
              State#state{connect = true,
                          target_socket = DstSocket}};
         {error, _Reason} ->
-            {next_state, 'WAIT_FOR_CONNECT', State}
+            {next_state, 'SETUP_CONNECTION', State}
     end;
-'WAIT_FOR_CONNECT'(info,
+'SETUP_CONNECTION'(info,
                    {tcp, Socket, <<?SOCKS_VERSION:?UBYTE,
                                    ?CONNECT:?UBYTE,
                                    ?RSV:?UBYTE,
@@ -231,13 +230,13 @@ format_status(_Opt, [_PDict, State, Data]) ->
     case handle_request(connect, {Socket, {A,B,C,D}, DstPort}) of
         {ok, DstSocket} ->
             {next_state,
-             'WAIT_FOR_DATA',
+             'CONNECTED',
              State#state{connect = true,
                          target_socket = DstSocket}};
         {error, _Reason} ->
-            {next_state, 'WAIT_FOR_CONNECT', State}
+            {next_state, 'SETUP_CONNECTION', State}
     end;
-'WAIT_FOR_CONNECT'(info,
+'SETUP_CONNECTION'(info,
                    {tcp, Socket, <<?SOCKS_VERSION:?UBYTE,
                                    ?CONNECT:?UBYTE,
                                    ?RSV:?UBYTE,
@@ -251,26 +250,27 @@ format_status(_Opt, [_PDict, State, Data]) ->
     case handle_request(connect, {Socket, {A,B,C,D,E,F,G,H}, DstPort}) of
         {ok, DstSocket} ->
             {next_state,
-             'WAIT_FOR_DATA',
+             'CONNECTED',
              State#state{connect = true,
                          target_socket = DstSocket}};
         {error, _Reason} ->
-            {next_state, 'WAIT_FOR_CONNECT', State}
+            {next_state, 'SETUP_CONNECTION', State}
     end;
 ?HANDLE_COMMON.
 
 
-'WAIT_FOR_DATA'(info, {tcp, CSocket, Data},
-                #state{target_socket=Socket} = State) ->
+'CONNECTED'(info, {tcp, CSocket, Data},
+                #state{socket = CSocket,
+                       target_socket = TSocket} = State) ->
     reset_socket(CSocket),
-    gen_tcp:send(Socket, Data),
-    {next_state, 'WAIT_FOR_DATA', State};
-'WAIT_FOR_DATA'(info, {tcp, TSocket, Data},
-                #state{socket=Socket} = State) ->
+    gen_tcp:send(TSocket, Data),
+    {next_state, 'CONNECTED', State};
+'CONNECTED'(info, {tcp, TSocket, Data},
+            #state{socket=CSocket} = State) ->
     reset_socket(TSocket),
-    gen_tcp:send(Socket, Data),
-    {next_state, 'WAIT_FOR_DATA', State};
-'WAIT_FOR_DATA'(_EventType, timeout, State) ->
+    gen_tcp:send(CSocket, Data),
+    {next_state, 'CONNECTED', State};
+'CONNECTED'(_EventType, timeout, State) ->
     ?LOG_ERROR("Client connection timeout."),
     {stop, normal, State};
 ?HANDLE_COMMON.
