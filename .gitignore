@@ -19,3 +19,4 @@ rebar3.crashdump
 *~
 */*~
 rebar.lock
+erlang_ls.config
