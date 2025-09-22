@@ -28,7 +28,7 @@
 
 -define(SOCK_OPTIONS,
         [binary,
-         {active, true},
+         {active, once},
          {packet, 0},
          {nodelay, true},
          {reuseaddr, true}]).
@@ -83,8 +83,7 @@ init([]) ->
     case gen_tcp:listen(maps:get(socks5_port, Config, ?DEFAULT_PORT),
                         ?SOCK_OPTIONS) of
         {ok, ListenSocket} ->
-            {ok, accept(#state{listener = ListenSocket,
-                               config = Config})};
+            {ok, #state{listener = ListenSocket, config = Config}};
         {error, Reason} ->
             ?LOG_ERROR("Server: listen error, ~p.", [Reason]),
             {stop, Reason}
@@ -118,8 +117,6 @@ handle_call(_Request, _From, State) ->
 %%                                  {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
-handle_cast(accepted, State) ->
-    {noreply, accept(State)};
 handle_cast(_Msg, State) ->
     {noreply, State}.
 
@@ -133,6 +130,12 @@ handle_cast(_Msg, State) ->
 %%                                   {stop, Reason, State}
 %% @end
 %%--------------------------------------------------------------------
+handle_info({tcp_accepted, ListenSocket, Socket}, State) ->
+    %% Re-enable accepting new connections
+    ok = inet:setopts(ListenSocket, [{active, once}]),
+    %% Start a worker for the new client
+    socks5_worker_sup:add_worker(Socket),
+    {noreply, State};
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -160,16 +163,7 @@ terminate(_Reason, #state{listener = ListenSocket}) ->
 %% @end
 %%--------------------------------------------------------------------
 code_change(_OldVsn, State, _Extra) ->
-        {ok, State}.
+    {ok, State}.
 
 %%%===================================================================
 %%% Internal functions
-%%%===================================================================
-accept(#state{listener = ListenSocket} = State) ->
-    proc_lib:spawn(fun() -> accept_loop(ListenSocket) end),
-    State.
-
-accept_loop(ListenSocket) ->
-    {ok, Socket} = gen_tcp:accept(ListenSocket),
-    gen_server:cast(?SERVER, accepted),
-    socks5_worker_sup:add_worker(Socket).

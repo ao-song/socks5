@@ -1,15 +1,17 @@
 socks5
 =====
-A toy project only implements part of [rfc1928](https://datatracker.ietf.org/doc/html/rfc1928) currently.
+A toy project that implements [rfc1928](https://datatracker.ietf.org/doc/html/rfc1928) (SOCKS5) and [rfc1929](https://datatracker.ietf.org/doc/html/rfc1929) (Username/Password Authentication).
 
 Supported:
 -----
-1. TCP connection and IPv6 target server
-2. NO AUTHENTICATION REQUIRED
+1. `CONNECT` command for TCP proxying (IPv4, IPv6, Domain Names).
+2. `BIND` command for accepting connections from a remote peer.
+3. `UDP ASSOCIATE` command for UDP proxying.
+4. Authentication Methods:
+    - `NO AUTHENTICATION REQUIRED`
+    - `USERNAME/PASSWORD`
 
 Todo:
 -----
-- [ ] UDP support
-- [ ] bind support
-- [ ] GSSAPI must and username/password impl
+- [ ] GSSAPI authentication (`GSSAPI`)
 - [ ] Client connction over tls/dtls
