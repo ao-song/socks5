@@ -1,0 +1,7 @@
+version: '3.8'
+
+services:
+  socks5:
+    build: .
+    ports:
+      - "1080:1080"
