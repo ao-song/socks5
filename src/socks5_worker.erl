@@ -188,7 +188,11 @@ format_status(_Opt, [_PDict, State, Data]) ->
     keep_state_and_data;
 ?HANDLE_COMMON.
 
-'AUTH_CLIENT'(info, {tcp, Socket, <<1:?UBYTE, ULen:?UBYTE, Username:ULen/binary, PLen:?UBYTE, Password:PLen/binary>>},
+'AUTH_CLIENT'(info, {tcp, Socket, <<1:?UBYTE,
+                                    ULen:?UBYTE,
+                                    Username:ULen/binary,
+                                    PLen:?UBYTE,
+                                    Password:PLen/binary>>},
               #state{auth_method = ?USERNAME_PASSWORD} = State) ->
     reset_socket(Socket),
     case validate_credentials(binary_to_list(Username), binary_to_list(Password)) of
@@ -205,7 +209,8 @@ format_status(_Opt, [_PDict, State, Data]) ->
 'AUTH_CLIENT'(info, {tcp, Socket, _AuthData},
               #state{auth_method = AuthMethod} = State) ->
     reset_socket(Socket),
-    ?LOG_ERROR("Unsupported authentication method (~p) or malformed authentication data. Close the connection!", [AuthMethod]),
+    ?LOG_ERROR("Unsupported authentication method (~p) or malformed "
+               "authentication data. Close the connection!", [AuthMethod]),
     gen_tcp:send(Socket, <<1:?UBYTE, 1:?UBYTE>>),
     {stop, normal, State};
 ?HANDLE_COMMON.
@@ -266,7 +271,8 @@ format_status(_Opt, [_PDict, State, Data]) ->
     end;
 ?HANDLE_COMMON.
 
-'UDP_RELAY'(info, {udp, UdpSocket, _ClientIP, _ClientPort, <<?RSV:?USHORT, Frag:?UBYTE, ATyp:?UBYTE, Rest/binary>>},
+'UDP_RELAY'(info, {udp, UdpSocket, _ClientIP, _ClientPort,
+                   <<?RSV:?USHORT, Frag:?UBYTE, ATyp:?UBYTE, Rest/binary>>},
             #state{udp_socket = UdpSocket}) ->
     % Only fragment 0 is supported
     case Frag of
