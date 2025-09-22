@@ -21,7 +21,7 @@
 %% gen_statem callbacks
 -export([callback_mode/0,
          init/1,
-         format_status/2,
+         format_status/1,
          terminate/3,
          code_change/4]).
 
@@ -119,10 +119,10 @@ init([]) ->
 %% (2) when gen_statem terminates abnormally.
 %% This callback is optional.
 %%
-%% @spec format_status(Opt, [PDict, State, Data]) -> Status
+%% @spec format_status([PDict, State, Data]) -> Status
 %% @end
 %%--------------------------------------------------------------------
-format_status(_Opt, [_PDict, State, Data]) ->
+format_status([_PDict, State, Data]) ->
     [{data, [{"State", {State, Data}}]}].
 
 %%--------------------------------------------------------------------
@@ -175,9 +175,12 @@ format_status(_Opt, [_PDict, State, Data]) ->
                       "close the connection."),
             {stop, normal, State};
         ?NO_AUTHENTICATION_REQUIRED ->
+            ?LOG_INFO("No authentication required, proceed to connection setup."),
             {next_state, 'SETUP_CONNECTION',
              State#state{auth_method = Method, authed_client = true}};
         _ ->
+            ?LOG_INFO("Selected authentication method: ~p, waiting for client auth data.",
+                      [Method]),
             {next_state, 'AUTH_CLIENT',
              State#state{auth_method = Method}}
     end;
@@ -488,10 +491,7 @@ handle_udp_associate_command(Socket, _ATyp, _Rest, State) ->
 
 close_socket_if_defined(undefined) -> ok;
 close_socket_if_defined(Socket) when is_port(Socket) ->
-    case inet:port_info(Socket, owner) of
-        {ok, UdpPid} when is_pid(UdpPid) -> gen_udp:close(Socket);
-        _ -> gen_tcp:close(Socket) % Assume TCP
-    end.
+    socket:close(Socket).
 
 reset_socket(Socket) ->
     inet:setopts(Socket, [{active, once}]).

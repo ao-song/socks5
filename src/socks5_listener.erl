@@ -83,6 +83,8 @@ init([]) ->
     case gen_tcp:listen(maps:get(socks5_port, Config, ?DEFAULT_PORT),
                         ?SOCK_OPTIONS) of
         {ok, ListenSocket} ->
+            ?LOG_INFO("Server Started, listening on port ~p.",
+                      [maps:get(socks5_port, Config, ?DEFAULT_PORT)]),
             {ok, #state{listener = ListenSocket, config = Config}};
         {error, Reason} ->
             ?LOG_ERROR("Server: listen error, ~p.", [Reason]),
@@ -131,6 +133,7 @@ handle_cast(_Msg, State) ->
 %% @end
 %%--------------------------------------------------------------------
 handle_info({tcp_accepted, ListenSocket, Socket}, State) ->
+    ?LOG_INFO("New client connected: ~p", [Socket]),
     %% Re-enable accepting new connections
     ok = inet:setopts(ListenSocket, [{active, once}]),
     %% Start a worker for the new client
