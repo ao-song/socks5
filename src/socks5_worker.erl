@@ -21,7 +21,7 @@
 %% gen_statem callbacks
 -export([callback_mode/0,
          init/1,
-         format_status/2,
+         format_status/1,
          terminate/3,
          code_change/4]).
 
@@ -30,6 +30,8 @@
          'AUTH_METHOD_NEG'/3,
          'AUTH_CLIENT'/3,
          'SETUP_CONNECTION'/3,
+         'BIND_WAIT_FOR_CONNECTION'/3,
+         'UDP_RELAY'/3,
          'CONNECTED'/3]).
 
 %% Macro
@@ -51,6 +53,8 @@
          auth_method,
          authed_client = false,
          connect = false,
+         bind_socket,
+         udp_socket,
          target_socket
         }).
 
@@ -115,10 +119,10 @@ init([]) ->
 %% (2) when gen_statem terminates abnormally.
 %% This callback is optional.
 %%
-%% @spec format_status(Opt, [PDict, State, Data]) -> Status
+%% @spec format_status([PDict, State, Data]) -> Status
 %% @end
 %%--------------------------------------------------------------------
-format_status(_Opt, [_PDict, State, Data]) ->
+format_status([_PDict, State, Data]) ->
     [{data, [{"State", {State, Data}}]}].
 
 %%--------------------------------------------------------------------
@@ -164,13 +168,19 @@ format_status(_Opt, [_PDict, State, Data]) ->
     reset_socket(Socket),
     Method = get_method(get_supported_methods(),
                         get_methods(Methods, MethodsNum)),
-    handle_request(auth_negotiation, {Socket, Method}),
+    handle_request(auth_negotiation, {Socket, Method}, State),
     case Method of
         ?NO_ACCEPTABLE_METHODS ->
             ?LOG_INFO("No acceptable auth methods from client, "
                       "close the connection."),
             {stop, normal, State};
+        ?NO_AUTHENTICATION_REQUIRED ->
+            ?LOG_INFO("No authentication required, proceed to connection setup."),
+            {next_state, 'SETUP_CONNECTION',
+             State#state{auth_method = Method, authed_client = true}};
         _ ->
+            ?LOG_INFO("Selected authentication method: ~p, waiting for client auth data.",
+                      [Method]),
             {next_state, 'AUTH_CLIENT',
              State#state{auth_method = Method}}
     end;
@@ -181,92 +191,125 @@ format_status(_Opt, [_PDict, State, Data]) ->
     keep_state_and_data;
 ?HANDLE_COMMON.
 
-%% TODO: GSSAPI must be supported,
-%%       Username/Password should be supported.
-'AUTH_CLIENT'(info, {tcp, Socket, AuthData},
-              #state{auth_method = AuthMethod} = State) ->
+'AUTH_CLIENT'(info, {tcp, Socket, <<1:?UBYTE,
+                                    ULen:?UBYTE,
+                                    Username:ULen/binary,
+                                    PLen:?UBYTE,
+                                    Password:PLen/binary>>},
+              #state{auth_method = ?USERNAME_PASSWORD} = State) ->
     reset_socket(Socket),
-    case auth_client(AuthData, AuthMethod) of
-        ok ->
+    case validate_credentials(binary_to_list(Username), binary_to_list(Password)) of
+        true ->
+            ?LOG_INFO("Client authenticated successfully."),
+            gen_tcp:send(Socket, <<1:?UBYTE, ?SUCCEEDED:?UBYTE>>),
             {next_state, 'SETUP_CONNECTION',
              State#state{authed_client = true}};
-        {error, Reason} ->
-            ?LOG_ERROR("Client authentication failed, "
-                       "close the connection! ~p", [Reason]),
+        false ->
+            ?LOG_ERROR("Client authentication failed: Invalid username or password."),
+            gen_tcp:send(Socket, <<1:?UBYTE, 1:?UBYTE>>), % Version 1, status 1 (failure)
+            {stop, normal, State}
+    end;
+'AUTH_CLIENT'(info, {tcp, Socket, _AuthData},
+              #state{auth_method = AuthMethod} = State) ->
+    reset_socket(Socket),
+    ?LOG_ERROR("Unsupported authentication method (~p) or malformed "
+               "authentication data. Close the connection!", [AuthMethod]),
+    gen_tcp:send(Socket, <<1:?UBYTE, 1:?UBYTE>>),
+    {stop, normal, State};
+?HANDLE_COMMON.
+
+'SETUP_CONNECTION'(info, {tcp, Socket, <<?SOCKS_VERSION:?UBYTE,
+                                         Command:?UBYTE,
+                                         ?RSV:?UBYTE,
+                                         ATyp:?UBYTE,
+                                         Rest/binary>>},
+                   #state{socket = Socket,
+                          authed_client = true} = State) ->
+    reset_socket(Socket),
+    case Command of
+        ?CONNECT ->
+            handle_connect_command(Socket, ATyp, Rest, State);
+        ?BIND ->
+            handle_bind_command(Socket, ATyp, Rest, State);
+        ?UDP_ASSOCIATE ->
+            handle_udp_associate_command(Socket, ATyp, Rest, State);
+        _ ->
+            ?LOG_ERROR("Unsupported SOCKS5 command: ~p", [Command]),
+            gen_tcp:send(Socket, <<?SOCKS_VERSION:?UBYTE,
+                                   ?CMD_NOT_SUPPORTED:?UBYTE,
+                                   ?RSV:?UBYTE,
+                                   0:?UINT,
+                                   0:?USHORT>>),
             {stop, normal, State}
     end;
 ?HANDLE_COMMON.
 
-'SETUP_CONNECTION'(info, {tcp, Socket, <<?SOCKS_VERSION:?UBYTE,
-                                         ?CONNECT:?UBYTE,
-                                         ?RSV:?UBYTE,
-                                         ?DOMAINNAME:?UBYTE,
-                                         Len:?UBYTE,
-                                         Hostname:Len/binary,
-                                         DstPort:?USHORT>>},
-                   #state{socket = Socket,
-                          authed_client = true} = State) ->
-    reset_socket(Socket),
-    case handle_request(connect,
-                        {Socket, binary_to_list(Hostname),
-                        DstPort}) of
-        {ok, DstSocket} ->
+'BIND_WAIT_FOR_CONNECTION'(info, {tcp, BindSocket, _Data},
+                           #state{socket = ClientSocket,
+                                  bind_socket = BindSocket} = State) ->
+    reset_socket(BindSocket),
+    case gen_tcp:accept(BindSocket) of
+        {ok, TargetSocket} ->
+            {ok, {Addr, Port}} = inet:peername(TargetSocket),
+            {Atyp, BndAddr, BndPort} = socks5_utils:format_address(Addr, Port),
+            gen_tcp:send(ClientSocket, <<?SOCKS_VERSION:?UBYTE,
+                                           ?SUCCEEDED:?UBYTE,
+                                           ?RSV:?UBYTE,
+                                           Atyp:?UBYTE,
+                                           BndAddr/binary,
+                                           BndPort:?USHORT>>),
+            inet:setopts(TargetSocket, ?SOCK_SERVER_OPTIONS),
             {next_state, 'CONNECTED',
              State#state{connect = true,
-                         target_socket = DstSocket}};
-        {error, _Reason} ->
-            {next_state, 'SETUP_CONNECTION', State}
+                         authed_client = true,
+                         target_socket = TargetSocket}};
+        {error, Reason} ->
+            ?LOG_ERROR("Bind accept error: ~p", [Reason]),
+            gen_tcp:send(ClientSocket, <<?SOCKS_VERSION:?UBYTE,
+                                           ?GENERAL_SOCKS_SERVER_FAILURE:?UBYTE,
+                                           ?RSV:?UBYTE,
+                                           0:?UINT,
+                                           0:?USHORT>>),
+            {stop, normal, State}
     end;
-'SETUP_CONNECTION'(info,
-                   {tcp, Socket, <<?SOCKS_VERSION:?UBYTE,
-                                   ?CONNECT:?UBYTE,
-                                   ?RSV:?UBYTE,
-                                   ?ATYP_IPV4:?UBYTE,
-                                   A:?UBYTE, B:?UBYTE, C:?UBYTE, D:?UBYTE,
-                                   DstPort:?USHORT>>},
-                   #state{socket = Socket,
-                          authed_client = true} = State) ->
-    reset_socket(Socket),
-    case handle_request(connect, {Socket, {A,B,C,D}, DstPort}) of
-        {ok, DstSocket} ->
-            {next_state,
-             'CONNECTED',
-             State#state{connect = true,
-                         target_socket = DstSocket}};
-        {error, _Reason} ->
-            {next_state, 'SETUP_CONNECTION', State}
+?HANDLE_COMMON.
+
+'UDP_RELAY'(info, {udp, UdpSocket, _ClientIP, _ClientPort,
+                   <<?RSV:?USHORT, Frag:?UBYTE, ATyp:?UBYTE, Rest/binary>>},
+            #state{udp_socket = UdpSocket}) ->
+    % Only fragment 0 is supported
+    case Frag of
+        0 ->
+            case socks5_utils:parse_address(ATyp, Rest) of
+                {ok, {TargetAddr, TargetPort, Data}} ->
+                    gen_udp:send(UdpSocket, TargetAddr, TargetPort, Data),
+                    keep_state_and_data;
+                {error, Reason} ->
+                    ?LOG_ERROR("Failed to parse UDP address: ~p", [Reason]),
+                    keep_state_and_data
+            end;
+        _ ->
+            ?LOG_ERROR("UDP fragmentation is not supported (Frag: ~p)", [Frag]),
+            keep_state_and_data
     end;
-'SETUP_CONNECTION'(info,
-                   {tcp, Socket, <<?SOCKS_VERSION:?UBYTE,
-                                   ?CONNECT:?UBYTE,
-                                   ?RSV:?UBYTE,
-                                   ?ATYP_IPV6:?UBYTE,
-                                   A:?USHORT, B:?USHORT, C:?USHORT, D:?USHORT,
-                                   E:?USHORT, F:?USHORT, G:?USHORT, H:?USHORT,
-                                   DstPort:?USHORT>>},
-                   #state{socket = Socket,
-                          authed_client = true} = State) ->
-    reset_socket(Socket),
-    case handle_request(connect, {Socket, {A,B,C,D,E,F,G,H}, DstPort}) of
-        {ok, DstSocket} ->
-            {next_state,
-             'CONNECTED',
-             State#state{connect = true,
-                         target_socket = DstSocket}};
-        {error, _Reason} ->
-            {next_state, 'SETUP_CONNECTION', State}
-    end;
+'UDP_RELAY'(info, {udp_passive, UdpSocket}, _State) ->
+    % This means the UDP socket was set to passive, we need to set it active again
+    inet:setopts(UdpSocket, [{active, once}]),
+    keep_state_and_data;
+'UDP_RELAY'(info, {tcp_closed, Socket}, #state{socket = Socket} = State) ->
+    ?LOG_INFO("Client TCP connection closed during UDP relay. Terminating UDP relay."),
+    {stop, normal, State};
 ?HANDLE_COMMON.
 
 
 'CONNECTED'(info, {tcp, CSocket, Data},
-                #state{socket = CSocket,
-                       target_socket = TSocket} = State) ->
+            #state{socket = CSocket,
+                   target_socket = TSocket} = State) ->
     reset_socket(CSocket),
     gen_tcp:send(TSocket, Data),
     {next_state, 'CONNECTED', State};
 'CONNECTED'(info, {tcp, TSocket, Data},
-            #state{socket=CSocket} = State) ->
+            #state{socket = CSocket} = State) ->
     reset_socket(TSocket),
     gen_tcp:send(CSocket, Data),
     {next_state, 'CONNECTED', State};
@@ -311,17 +354,13 @@ handle_common(EventType, Event, _Data) ->
 %%--------------------------------------------------------------------
 terminate(_Reason, _StateName,
           #state{socket=Socket,
+                 bind_socket=BindSocket,
+                 udp_socket=UdpSocket,
                  target_socket=TarSocket}) ->
-    case {Socket, TarSocket} of
-        {undefined, undefined} -> ok;
-        {Socket, undefined} ->
-            gen_tcp:close(Socket);
-        {undefined, TarSocket} ->
-            gen_tcp:close(TarSocket);
-        {_S, _TS} ->
-            gen_tcp:close(Socket),
-            gen_tcp:close(TarSocket)
-    end,
+    ok = close_socket_if_defined(Socket),
+    ok = close_socket_if_defined(BindSocket),
+    ok = close_socket_if_defined(UdpSocket),
+    ok = close_socket_if_defined(TarSocket),
     ok.
 
 %%--------------------------------------------------------------------
@@ -340,28 +379,119 @@ code_change(_OldVsn, State, Data, _Extra) ->
 %%%===================================================================
 %%% Internal functions
 %%%===================================================================
-handle_request(auth_negotiation, {Socket, Method}) ->
-    ok = gen_tcp:send(Socket, <<?SOCKS_VERSION:?UBYTE, Method:?UBYTE>>),
-    {ok, Method};
-handle_request(connect, {Socket, DstAddr, DstPort}) ->
+
+handle_request(connect, {Socket, DstAddr, DstPort}, State) ->
     case gen_tcp:connect(DstAddr, DstPort, ?SOCK_SERVER_OPTIONS) of
         {ok, DstSocket} ->
+            {ok, {Addr, Port}} = inet:sockname(DstSocket),
+            {Atyp, BndAddr, BndPort} = socks5_utils:format_address(Addr, Port),
             gen_tcp:send(Socket, <<?SOCKS_VERSION:?UBYTE,
                                    ?SUCCEEDED:?UBYTE,
                                    ?RSV:?UBYTE,
-                                   ?ATYP_IPV4:?UBYTE,
-                                   0:?UINT,
-                                   0:?USHORT>>),
-            {ok, DstSocket};
+                                   Atyp:?UBYTE,
+                                   BndAddr/binary,
+                                   BndPort:?USHORT>>),
+            {next_state, 'CONNECTED',
+             State#state{connect = true, target_socket = DstSocket}};
         {error, Reason} ->
-            ?LOG_ERROR("Connect to target host error: ~p", [Reason]),
-            gen_tcp:send(Socket, <<?SOCKS_VERSION:?UBYTE,
-                                   ?GENERAL_SOCKS_SERVER_FAILURE:?UBYTE,
-                                   ?RSV:?UBYTE,
-                                   0:?UINT,
-                                   0:?USHORT>>),
-            {error, Reason}
+            handle_connect_error(Socket, Reason),
+            {stop, normal, State}
+    end;
+handle_request(auth_negotiation, {Socket, Method}, _State) ->
+    ok = gen_tcp:send(Socket, <<?SOCKS_VERSION:?UBYTE, Method:?UBYTE>>),
+    {ok, Method};
+handle_request(bind, {ClientSocket, _BindAddr, _BindPort}, State) ->
+    % For BIND, the client specifies the address/port it expects the SOCKS server to bind to.
+    % However, for simplicity, we'll let the OS choose a port and report it back.
+    % A more complete implementation would try to bind to the requested address/port.
+    case gen_tcp:listen(0, ?SOCK_SERVER_OPTIONS) of % Listen on any available port
+        {ok, ListenSocket} ->
+            {ok, {BindAddr, BindPort}} = inet:sockname(ListenSocket),
+            {Atyp, BndAddr, BndPort} = socks5_utils:format_address(BindAddr, BindPort),
+            gen_tcp:send(ClientSocket, <<?SOCKS_VERSION:?UBYTE,
+                                           ?SUCCEEDED:?UBYTE,
+                                           ?RSV:?UBYTE,
+                                           Atyp:?UBYTE,
+                                           BndAddr/binary,
+                                           BndPort:?USHORT>>),
+            inet:setopts(ListenSocket, [{active, once}]), % Wait for the incoming connection
+            {next_state, 'BIND_WAIT_FOR_CONNECTION', State#state{bind_socket = ListenSocket}};
+        {error, Reason} ->
+            ?LOG_ERROR("Bind listen error: ~p", [Reason]),
+            ErrorReply = socks5_utils:reason_to_socks_error(Reason),
+            gen_tcp:send(ClientSocket, <<?SOCKS_VERSION:?UBYTE,
+                                           ErrorReply:?UBYTE,
+                                           ?RSV:?UBYTE,
+                                           ?ATYP_IPV4, 0:32, 0:16>>),
+            {stop, normal, State}
     end.
+
+handle_connect_command(Socket, ?ATYP_IPV4, <<A:?UBYTE, B:?UBYTE, C:?UBYTE, D:?UBYTE, DstPort:?USHORT>>, State) ->
+    handle_request(connect, {Socket, {A,B,C,D}, DstPort}, State);
+handle_connect_command(Socket, ?ATYP_IPV6, <<A:?USHORT, B:?USHORT, C:?USHORT, D:?USHORT,
+                                             E:?USHORT, F:?USHORT, G:?USHORT, H:?USHORT,
+                                             DstPort:?USHORT>>, State) ->
+    handle_request(connect, {Socket, {A,B,C,D,E,F,G,H}, DstPort}, State);
+handle_connect_command(Socket, ?DOMAINNAME, <<Len:?UBYTE, Hostname:Len/binary, DstPort:?USHORT>>, State) ->
+    handle_request(connect, {Socket, binary_to_list(Hostname), DstPort}, State);
+handle_connect_command(Socket, ATyp, _Rest, State) ->
+    ?LOG_ERROR("Unsupported ATYP for CONNECT command: ~p", [ATyp]),
+    gen_tcp:send(Socket, <<?SOCKS_VERSION:?UBYTE, ?ATYP_NOT_SUPPORTED:?UBYTE, ?RSV:?UBYTE, 0:?UINT, 0:?USHORT>>),
+    {next_state, 'SETUP_CONNECTION', State}.
+
+handle_connect_error(Socket, Reason) ->
+    ?LOG_ERROR("Connect to target host error: ~p", [Reason]),
+    ErrorReply = socks5_utils:reason_to_socks_error(Reason),
+    gen_tcp:send(Socket, <<?SOCKS_VERSION:?UBYTE,
+                           ErrorReply:?UBYTE,
+                           ?RSV:?UBYTE,
+                           ?ATYP_IPV4, 0:32, 0:16>>),
+    ok.
+
+handle_bind_command(Socket, ?ATYP_IPV4, <<A:?UBYTE, B:?UBYTE, C:?UBYTE, D:?UBYTE, DstPort:?USHORT>>, State) ->
+    handle_request(bind, {Socket, {A,B,C,D}, DstPort}, State);
+handle_bind_command(Socket, ?ATYP_IPV6, <<A:?USHORT, B:?USHORT, C:?USHORT, D:?USHORT,
+                                          E:?USHORT, F:?USHORT, G:?USHORT, H:?USHORT,
+                                          DstPort:?USHORT>>, State) ->
+    handle_request(bind, {Socket, {A,B,C,D,E,F,G,H}, DstPort}, State);
+handle_bind_command(Socket, ?DOMAINNAME, <<Len:?UBYTE, Hostname:Len/binary, DstPort:?USHORT>>, State) ->
+    handle_request(bind, {Socket, binary_to_list(Hostname), DstPort}, State);
+handle_bind_command(Socket, ATyp, _Rest, State) ->
+    ?LOG_ERROR("Unsupported ATYP for BIND command: ~p", [ATyp]),
+    gen_tcp:send(Socket, <<?SOCKS_VERSION:?UBYTE,
+                           ?ATYP_NOT_SUPPORTED:?UBYTE,
+                           ?RSV:?UBYTE,
+                           ?ATYP_IPV4, 0:32, 0:16>>),
+    {next_state, 'SETUP_CONNECTION', State}.
+
+handle_udp_associate_command(Socket, _ATyp, _Rest, State) ->
+    % The client provides a desired BND.ADDR and BND.PORT, but the server
+    % typically assigns its own UDP port and reports it back.
+    % The ATyp and Rest here are for the desired address, which we'll ignore for now.
+    case gen_udp:open(0, [{active, once}, binary]) of % Open on any available port
+        {ok, UdpSocket} ->
+            {ok, {BoundIP, BoundPort}} = inet:sockname(UdpSocket),
+            {Atyp, BndAddr, _BndPort} = socks5_utils:format_address(BoundIP, BoundPort),
+            gen_tcp:send(Socket, <<?SOCKS_VERSION:?UBYTE,
+                                   ?SUCCEEDED:?UBYTE,
+                                   ?RSV:?UBYTE,
+                                   Atyp:?UBYTE,
+                                   BndAddr/binary,
+                                   BoundPort:?USHORT>>),
+            {next_state, 'UDP_RELAY', State#state{udp_socket = UdpSocket}};
+        {error, Reason} ->
+            ?LOG_ERROR("UDP associate error: ~p", [Reason]),
+            ErrorReply = socks5_utils:reason_to_socks_error(Reason),
+            gen_tcp:send(Socket, <<?SOCKS_VERSION:?UBYTE,
+                                   ErrorReply:?UBYTE,
+                                   ?RSV:?UBYTE,
+                                   ?ATYP_IPV4, 0:32, 0:16>>),
+            {stop, normal, State}
+    end.
+
+close_socket_if_defined(undefined) -> ok;
+close_socket_if_defined(Socket) when is_port(Socket) ->
+    socket:close(Socket).
 
 reset_socket(Socket) ->
     inet:setopts(Socket, [{active, once}]).
@@ -376,7 +506,7 @@ get_methods(<<Method:?UBYTE, MethodsLeft>>, MethodsNum, MethodList) ->
 
 
 get_supported_methods() ->
-    [?GSSAPI, ?USERNAME_PASSWORD, ?NO_AUTHENTICATION_REQUIRED].
+    [?USERNAME_PASSWORD, ?NO_AUTHENTICATION_REQUIRED].
 
 get_method(_SupportedMethods, []) ->
     ?NO_ACCEPTABLE_METHODS;
@@ -390,5 +520,11 @@ get_method([M | SupportedMethods], MethodList) ->
             get_method(SupportedMethods, MethodList)
     end.
 
-auth_client(_AuthData, _AuthMethod) ->
-    ok.
+validate_credentials(Username, Password) ->
+    case socks5_utils:get_user_credentials() of
+        {ok, #{username := ExpectedUsername, password := ExpectedPassword}} ->
+            Username == ExpectedUsername andalso Password == ExpectedPassword;
+        _ ->
+            ?LOG_ERROR("No user credentials configured, authentication will always fail."),
+            false
+    end.

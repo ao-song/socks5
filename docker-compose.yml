@@ -1,0 +1,7 @@
+services:
+  socks5:
+    build: .
+    image: socks5
+    container_name: socks5
+    ports:
+      - "1080:1080"
