@@ -1,16 +1,13 @@
 {application, socks5,
- [{description, "A socks5 application"},
+ [{description, "A SOCKS5 server (RFC 1928, RFC 1929, RFC 1961)"},
   {vsn, "0.1.0"},
-  {registered, []},
-  {mod, { socks5_app, []}},
-  {applications,
-   [kernel,
-    stdlib,
-    logger
-   ]},
-  {env,[]},
+  {registered, [socks5_sup, socks5_listener, socks5_worker_sup]},
+  {mod, {socks5_app, []}},
+  {applications, [kernel, stdlib, crypto]},
+  %% Kerberos V5 GSS-API mechanism; only needed for the gssapi method.
+  {optional_applications, [kerlberos]},
+  {env, []},
   {modules, []},
-
   {maintainers, []},
   {licenses, ["Apache 2.0"]},
   {links, []}

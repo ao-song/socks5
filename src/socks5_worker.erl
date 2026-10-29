@@ -1,29 +1,28 @@
 %%%-------------------------------------------------------------------
 %%% @author Ao Song
 %%% @copyright (C) 2019, Ao Song
-%%% @doc
+%%% @doc One SOCKS5 client connection (RFC 1928, RFC 1929, RFC 1961).
 %%%
+%%% The handshake states read exact-length protocol fields with a
+%%% passive gen_tcp:recv/3, so TCP segment boundaries never matter.
+%%% Once the request has been served the sockets switch to
+%%% {active, once} and the relay states forward traffic. With GSSAPI
+%%% at protection level 1 or 2, everything after authentication is
+%%% encapsulated through socks5_gssapi.
 %%% @end
-%%% Created : 2019-11-13 14:39:38.009820
 %%%-------------------------------------------------------------------
 -module(socks5_worker).
 
 -behaviour(gen_statem).
 
 -include("socks5.hrl").
-
 -include_lib("kernel/include/logger.hrl").
 
 %% API
--export([start_link/0,
-         set_socket/2]).
+-export([start_link/0, set_socket/2]).
 
 %% gen_statem callbacks
--export([callback_mode/0,
-         init/1,
-         format_status/1,
-         terminate/3,
-         code_change/4]).
+-export([callback_mode/0, init/1, terminate/3]).
 
 %% states
 -export(['WAIT_FOR_SOCKET'/3,
@@ -34,45 +33,31 @@
          'UDP_RELAY'/3,
          'CONNECTED'/3]).
 
-%% Macro
--define(SERVER, ?MODULE).
--define(SOCK_SERVER_OPTIONS,
-        [{active, once},
-         binary,
-         {packet, 0},
-         {nodelay, true},
-         {reuseaddr, true}]).
-
 -define(HANDLE_COMMON,
         ?FUNCTION_NAME(T, C, D) -> handle_common(T, C, D)).
+-define(RUN, {next_event, internal, run}).
+-define(ACTIVE_ONCE, [{active, once}]).
+-define(TARGET_OPTS, [binary, {active, false}, {nodelay, true}]).
 
-%% Record
 -record(state,
-        {
-         socket,
-         auth_method,
-         authed_client = false,
-         connect = false,
-         bind_socket,
-         udp_socket,
-         target_socket
-        }).
+        {socket,         % client TCP socket
+         method,         % selected auth method
+         gss,            % socks5_gssapi:ctx() when messages are encapsulated
+         buf = <<>>,     % client bytes not yet forming a whole GSSAPI frame
+         target,         % remote TCP socket (CONNECT / BIND)
+         closed,         % CONNECTED: the socket whose read side is already closed
+         expect,         % BIND: DST.ADDR the client expects the peer from
+         udp,            % UDP relay socket
+         udp_family,     % inet6 (dual-stack) | inet
+         client_udp,     % {IP, Port | undefined}: where client datagrams come from
+         idle}).         % idle timeout for the relay states
 
 %%%===================================================================
 %%% API
 %%%===================================================================
 
-%%--------------------------------------------------------------------
-%% @doc
-%% Creates a gen_statem process which calls Module:init/1 to
-%% initialize. To ensure a synchronized start-up procedure, this
-%% function does not return until Module:init/1 has returned.
-%%
-%% @spec start_link() -> {ok, Pid} | ignore | {error, Error}
-%% @end
-%%--------------------------------------------------------------------
 start_link() ->
-    gen_statem:start_link({local, ?SERVER}, ?MODULE, [], []).
+    gen_statem:start_link(?MODULE, [], []).
 
 set_socket(Child, Socket) when is_pid(Child), is_port(Socket) ->
     gen_statem:cast(Child, {socket_ready, Socket}).
@@ -81,450 +66,427 @@ set_socket(Child, Socket) when is_pid(Child), is_port(Socket) ->
 %%% gen_statem callbacks
 %%%===================================================================
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Define the callback_mode() for this callback module.
-%%
-%% @spec callback_mode() -> state_functions |
-%%                          handle_event_function |
-%%                          [state_functions, state_enter] |
-%%                          [handle_event_function, state_enter]
-%% @end
-%%--------------------------------------------------------------------
 callback_mode() ->
     state_functions.
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Whenever a gen_statem is started using gen_statem:start/[3,4] or
-%% gen_statem:start_link/[3,4], this function is called by the new
-%% process to initialize.
-%%
-%% @spec init(Args) -> {ok, State, Data} |
-%%                     {ok, State, Data, Actions} |
-%%                     ignore |
-%%                     {stop, Reason}
-%% @end
-%%--------------------------------------------------------------------
 init([]) ->
-    process_flag(trap_exit, true),
-    {ok, 'WAIT_FOR_SOCKET', #state{}}.
+    {ok, 'WAIT_FOR_SOCKET', #state{idle = socks5_utils:idle_timeout()}}.
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Called (1) whenever sys:get_status/1,2 is called by gen_statem or
-%% (2) when gen_statem terminates abnormally.
-%% This callback is optional.
-%%
-%% @spec format_status([PDict, State, Data]) -> Status
-%% @end
-%%--------------------------------------------------------------------
-format_status([_PDict, State, Data]) ->
-    [{data, [{"State", {State, Data}}]}].
+%% Sockets close with the process; only the GSS context needs cleanup.
+terminate(_Reason, _State, #state{gss = Gss}) ->
+    socks5_gssapi:delete(Gss).
 
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% There should be one instance of this function for each possible
-%% state name.  If callback_mode is statefunctions, one of these
-%% functions is called when gen_statem receives and event from
-%% call/2, cast/2, or as a normal process message.
-%%
-%% @spec state_name(Event, OldState, Data) ->
-%%                   {next_state, NextState, NewData} |
-%%                   {next_state, NextState, NewData, Actions} |
-%%                   {keep_state, NewData} |
-%%                   {keep_state, NewData, Actions} |
-%%                   keep_state_and_data |
-%%                   {keep_state_and_data, Actions} |
-%%                   {repeat_state, NewData} |
-%%                   {repeat_state, NewData, Actions} |
-%%                   repeat_state_and_data |
-%%                   {repeat_state_and_data, Actions} |
-%%                   stop |
-%%                   {stop, Reason} |
-%%                   {stop, Reason, NewData} |
-%%                   {stop_and_reply, Reason, Replies} |
-%%                   {stop_and_reply, Reason, Replies, NewData}
-%% @end
-%%--------------------------------------------------------------------
-'WAIT_FOR_SOCKET'(cast, {socket_ready, Socket}, _State) ->
-    inet:setopts(Socket, ?SOCK_SERVER_OPTIONS),
-    {next_state, 'AUTH_METHOD_NEG', #state{socket = Socket}};
-'WAIT_FOR_SOCKET'(_EventType, Other, State) ->
-    ?LOG_WARNING("State: 'WAIT_FOR_SOCKET'. "
-                 "Unexpected message: ~p", [Other]),
-    {next_state, 'WAIT_FOR_SOCKET', State}.
+%%%===================================================================
+%%% States
+%%%===================================================================
 
-%% receive the method negotiation request
-'AUTH_METHOD_NEG'(info, {tcp, Socket, <<?SOCKS_VERSION:?UBYTE,
-                                        MethodsNum:?UBYTE,
-                                        Methods:(MethodsNum*8)/binary>>},
-                #state{socket = Socket,
-                       auth_method = undefined} = State) ->
-    reset_socket(Socket),
-    Method = get_method(get_supported_methods(),
-                        get_methods(Methods, MethodsNum)),
-    handle_request(auth_negotiation, {Socket, Method}, State),
-    case Method of
-        ?NO_ACCEPTABLE_METHODS ->
-            ?LOG_INFO("No acceptable auth methods from client, "
-                      "close the connection."),
-            {stop, normal, State};
-        ?NO_AUTHENTICATION_REQUIRED ->
-            ?LOG_INFO("No authentication required, proceed to connection setup."),
-            {next_state, 'SETUP_CONNECTION',
-             State#state{auth_method = Method, authed_client = true}};
-        _ ->
-            ?LOG_INFO("Selected authentication method: ~p, waiting for client auth data.",
-                      [Method]),
-            {next_state, 'AUTH_CLIENT',
-             State#state{auth_method = Method}}
-    end;
-'AUTH_METHOD_NEG'(info, {tcp, Socket, Data}, _State) ->
-    reset_socket(Socket),
-    ?LOG_WARNING("Data ~p arrived in incorrect state! "
-                 "This message will be ignored", [Data]),
-    keep_state_and_data;
+'WAIT_FOR_SOCKET'(cast, {socket_ready, Socket}, Data) ->
+    {next_state, 'AUTH_METHOD_NEG', Data#state{socket = Socket}, ?RUN};
 ?HANDLE_COMMON.
 
-'AUTH_CLIENT'(info, {tcp, Socket, <<1:?UBYTE,
-                                    ULen:?UBYTE,
-                                    Username:ULen/binary,
-                                    PLen:?UBYTE,
-                                    Password:PLen/binary>>},
-              #state{auth_method = ?USERNAME_PASSWORD} = State) ->
-    reset_socket(Socket),
-    case validate_credentials(binary_to_list(Username), binary_to_list(Password)) of
+%% RFC 1928 section 3
+'AUTH_METHOD_NEG'(internal, run, Data) ->
+    handshake(fun negotiate/1, Data);
+?HANDLE_COMMON.
+
+%% RFC 1929 / RFC 1961
+'AUTH_CLIENT'(internal, run, Data) ->
+    handshake(fun authenticate/1, Data);
+?HANDLE_COMMON.
+
+%% RFC 1928 section 4
+'SETUP_CONNECTION'(internal, run, Data) ->
+    handshake(fun request/1, Data);
+?HANDLE_COMMON.
+
+%% Second BIND reply: the peer connected (or the accept failed).
+'BIND_WAIT_FOR_CONNECTION'(info, {bind_accepted, {ok, Target}},
+                           #state{expect = Expect} = Data) ->
+    {ok, {PeerIP, _} = Peer} = inet:peername(Target),
+    case peer_allowed(PeerIP, Expect) of
         true ->
-            ?LOG_INFO("Client authenticated successfully."),
-            gen_tcp:send(Socket, <<1:?UBYTE, ?SUCCEEDED:?UBYTE>>),
-            {next_state, 'SETUP_CONNECTION',
-             State#state{authed_client = true}};
+            connected(Target, reply(?SUCCEEDED, Peer, Data));
         false ->
-            ?LOG_ERROR("Client authentication failed: Invalid username or password."),
-            gen_tcp:send(Socket, <<1:?UBYTE, 1:?UBYTE>>), % Version 1, status 1 (failure)
-            {stop, normal, State}
+            ?LOG_WARNING("BIND: rejected peer ~p, expected ~p", [PeerIP, Expect]),
+            reply(?CONNECTION_NOT_ALLOWED, Data),
+            stop
     end;
-'AUTH_CLIENT'(info, {tcp, Socket, _AuthData},
-              #state{auth_method = AuthMethod} = State) ->
-    reset_socket(Socket),
-    ?LOG_ERROR("Unsupported authentication method (~p) or malformed "
-               "authentication data. Close the connection!", [AuthMethod]),
-    gen_tcp:send(Socket, <<1:?UBYTE, 1:?UBYTE>>),
-    {stop, normal, State};
+'BIND_WAIT_FOR_CONNECTION'(info, {bind_accepted, {error, Reason}}, Data) ->
+    reply(socks5_utils:reason_to_socks_error(Reason), Data),
+    stop;
 ?HANDLE_COMMON.
 
-'SETUP_CONNECTION'(info, {tcp, Socket, <<?SOCKS_VERSION:?UBYTE,
-                                         Command:?UBYTE,
-                                         ?RSV:?UBYTE,
-                                         ATyp:?UBYTE,
-                                         Rest/binary>>},
-                   #state{socket = Socket,
-                          authed_client = true} = State) ->
-    reset_socket(Socket),
-    case Command of
-        ?CONNECT ->
-            handle_connect_command(Socket, ATyp, Rest, State);
-        ?BIND ->
-            handle_bind_command(Socket, ATyp, Rest, State);
-        ?UDP_ASSOCIATE ->
-            handle_udp_associate_command(Socket, ATyp, Rest, State);
-        _ ->
-            ?LOG_ERROR("Unsupported SOCKS5 command: ~p", [Command]),
-            gen_tcp:send(Socket, <<?SOCKS_VERSION:?UBYTE,
-                                   ?CMD_NOT_SUPPORTED:?UBYTE,
-                                   ?RSV:?UBYTE,
-                                   0:?UINT,
-                                   0:?USHORT>>),
-            {stop, normal, State}
-    end;
+%% RFC 1928 section 7. Datagrams from the client's endpoint go out,
+%% anything else is a remote reply that gets wrapped and sent back.
+%% The association lives as long as the client's TCP connection.
+'UDP_RELAY'(info, {udp, Udp, IP0, Port, Packet},
+            #state{udp = Udp, client_udp = Client} = Data) ->
+    inet:setopts(Udp, ?ACTIVE_ONCE),
+    IP = socks5_utils:unmap(IP0),
+    Data1 = case Client of
+                {IP, CPort} when CPort =:= Port; CPort =:= undefined ->
+                    relay_out(Packet, Data#state{client_udp = {IP, Port}});
+                {_, CPort} when is_integer(CPort) ->
+                    relay_in({IP, Port}, Packet, Data);
+                _ ->
+                    Data   % remote traffic before the client spoke: dropped
+            end,
+    {keep_state, Data1, idle(Data1)};
 ?HANDLE_COMMON.
 
-'BIND_WAIT_FOR_CONNECTION'(info, {tcp, BindSocket, _Data},
-                           #state{socket = ClientSocket,
-                                  bind_socket = BindSocket} = State) ->
-    reset_socket(BindSocket),
-    case gen_tcp:accept(BindSocket) of
-        {ok, TargetSocket} ->
-            {ok, {Addr, Port}} = inet:peername(TargetSocket),
-            {Atyp, BndAddr, BndPort} = socks5_utils:format_address(Addr, Port),
-            gen_tcp:send(ClientSocket, <<?SOCKS_VERSION:?UBYTE,
-                                           ?SUCCEEDED:?UBYTE,
-                                           ?RSV:?UBYTE,
-                                           Atyp:?UBYTE,
-                                           BndAddr/binary,
-                                           BndPort:?USHORT>>),
-            inet:setopts(TargetSocket, ?SOCK_SERVER_OPTIONS),
-            {next_state, 'CONNECTED',
-             State#state{connect = true,
-                         authed_client = true,
-                         target_socket = TargetSocket}};
+'CONNECTED'(info, {tcp, Socket, Bytes},
+            #state{socket = Socket, gss = undefined, target = Target} = Data) ->
+    forward(Target, Bytes, Socket, Data);
+'CONNECTED'(info, {tcp, Socket, Bytes},
+            #state{socket = Socket, gss = Gss, buf = Buf, target = Target} = Data) ->
+    case socks5_gssapi:unwrap_stream(<<Buf/binary, Bytes/binary>>, Gss) of
+        {ok, Plain, Rest, Gss1} ->
+            forward(Target, Plain, Socket, Data#state{gss = Gss1, buf = Rest});
         {error, Reason} ->
-            ?LOG_ERROR("Bind accept error: ~p", [Reason]),
-            gen_tcp:send(ClientSocket, <<?SOCKS_VERSION:?UBYTE,
-                                           ?GENERAL_SOCKS_SERVER_FAILURE:?UBYTE,
-                                           ?RSV:?UBYTE,
-                                           0:?UINT,
-                                           0:?USHORT>>),
-            {stop, normal, State}
+            ?LOG_WARNING("GSSAPI: bad client data: ~p", [Reason]),
+            stop
     end;
+'CONNECTED'(info, {tcp, Target, Bytes}, #state{target = Target} = Data) ->
+    case send_to_client(Bytes, Data) of
+        {ok, Data1} ->
+            inet:setopts(Target, ?ACTIVE_ONCE),
+            {keep_state, Data1, idle(Data1)};
+        {error, _} ->
+            stop
+    end;
+%% Half-close: pass the FIN on and keep relaying the other direction.
+'CONNECTED'(info, {tcp_closed, From}, #state{closed = undefined} = Data) ->
+    gen_tcp:shutdown(other(From, Data), write),
+    {keep_state, Data#state{closed = From}, idle(Data)};
+'CONNECTED'(info, {tcp_closed, _}, _Data) ->
+    stop;
 ?HANDLE_COMMON.
 
-'UDP_RELAY'(info, {udp, UdpSocket, _ClientIP, _ClientPort,
-                   <<?RSV:?USHORT, Frag:?UBYTE, ATyp:?UBYTE, Rest/binary>>},
-            #state{udp_socket = UdpSocket}) ->
-    % Only fragment 0 is supported
-    case Frag of
-        0 ->
-            case socks5_utils:parse_address(ATyp, Rest) of
-                {ok, {TargetAddr, TargetPort, Data}} ->
-                    gen_udp:send(UdpSocket, TargetAddr, TargetPort, Data),
-                    keep_state_and_data;
-                {error, Reason} ->
-                    ?LOG_ERROR("Failed to parse UDP address: ~p", [Reason]),
-                    keep_state_and_data
-            end;
-        _ ->
-            ?LOG_ERROR("UDP fragmentation is not supported (Frag: ~p)", [Frag]),
-            keep_state_and_data
-    end;
-'UDP_RELAY'(info, {udp_passive, UdpSocket}, _State) ->
-    % This means the UDP socket was set to passive, we need to set it active again
-    inet:setopts(UdpSocket, [{active, once}]),
+handle_common(info, {tcp_closed, _}, _Data) ->
+    stop;
+handle_common(info, {tcp_error, _, _}, _Data) ->
+    stop;
+handle_common({timeout, idle}, idle, _Data) ->
+    ?LOG_INFO("Idle timeout, closing"),
+    stop;
+handle_common(info, {tcp, Socket, _}, _Data) ->
+    %% Client data while waiting for BIND / during UDP: not part of the
+    %% protocol, ignored.
+    inet:setopts(Socket, ?ACTIVE_ONCE),
     keep_state_and_data;
-'UDP_RELAY'(info, {tcp_closed, Socket}, #state{socket = Socket} = State) ->
-    ?LOG_INFO("Client TCP connection closed during UDP relay. Terminating UDP relay."),
-    {stop, normal, State};
-?HANDLE_COMMON.
-
-
-'CONNECTED'(info, {tcp, CSocket, Data},
-            #state{socket = CSocket,
-                   target_socket = TSocket} = State) ->
-    reset_socket(CSocket),
-    gen_tcp:send(TSocket, Data),
-    {next_state, 'CONNECTED', State};
-'CONNECTED'(info, {tcp, TSocket, Data},
-            #state{socket = CSocket} = State) ->
-    reset_socket(TSocket),
-    gen_tcp:send(CSocket, Data),
-    {next_state, 'CONNECTED', State};
-'CONNECTED'(_EventType, timeout, State) ->
-    ?LOG_ERROR("Client connection timeout."),
-    {stop, normal, State};
-?HANDLE_COMMON.
-
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Handle comment events for all states.
-%%
-%% @end
-%%--------------------------------------------------------------------
-
-handle_common(_EventType, {tcp_closed, Socket},
-              #state{socket=Socket} = State) ->
-    ?LOG_INFO("Client disconnected."),
-    {stop, normal, State};
-handle_common(_EventType, {tcp_closed, Socket},
-              #state{target_socket=Socket} = State) ->
-    ?LOG_INFO("Server disconnected."),
-    {stop, normal, State};
-handle_common({call, From}, _Msg, _Data) ->
-    {keep_state_and_data, [{reply, From, ok}]};
-handle_common(EventType, Event, _Data) ->
-    ?LOG_ERROR("Unexpected event: ~p:~p", [EventType, Event]),
+handle_common(Type, Event, _Data) ->
+    ?LOG_WARNING("Unexpected event ~p:~p", [Type, Event]),
     keep_state_and_data.
 
-
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% This function is called by a gen_statem when it is about to
-%% terminate. It should be the opposite of Module:init/1 and do any
-%% necessary cleaning up. When it returns, the gen_statem terminates
-%% with Reason. The return value is ignored.
-%%
-%% @spec terminate(Reason, State, Data) -> Ignored
-%% @end
-%%--------------------------------------------------------------------
-terminate(_Reason, _StateName,
-          #state{socket=Socket,
-                 bind_socket=BindSocket,
-                 udp_socket=UdpSocket,
-                 target_socket=TarSocket}) ->
-    ok = close_socket_if_defined(Socket),
-    ok = close_socket_if_defined(BindSocket),
-    ok = close_socket_if_defined(UdpSocket),
-    ok = close_socket_if_defined(TarSocket),
-    ok.
-
-%%--------------------------------------------------------------------
-%% @private
-%% @doc
-%% Convert process state when code is changed
-%%
-%% @spec code_change(OldVsn, OldState, OldData, Extra) ->
-%%                   {ok, NewState, NewData} |
-%%                   Reason
-%% @end
-%%--------------------------------------------------------------------
-code_change(_OldVsn, State, Data, _Extra) ->
-    {ok, State, Data}.
-
 %%%===================================================================
-%%% Internal functions
+%%% Handshake phases. Each reads from the socket with recv/2, which
+%%% throws {socks5, Reason} on error; handshake/2 turns that into a
+%%% clean stop.
 %%%===================================================================
 
-handle_request(connect, {Socket, DstAddr, DstPort}, State) ->
-    case gen_tcp:connect(DstAddr, DstPort, ?SOCK_SERVER_OPTIONS) of
-        {ok, DstSocket} ->
-            {ok, {Addr, Port}} = inet:sockname(DstSocket),
-            {Atyp, BndAddr, BndPort} = socks5_utils:format_address(Addr, Port),
-            gen_tcp:send(Socket, <<?SOCKS_VERSION:?UBYTE,
-                                   ?SUCCEEDED:?UBYTE,
-                                   ?RSV:?UBYTE,
-                                   Atyp:?UBYTE,
-                                   BndAddr/binary,
-                                   BndPort:?USHORT>>),
-            {next_state, 'CONNECTED',
-             State#state{connect = true, target_socket = DstSocket}};
-        {error, Reason} ->
-            handle_connect_error(Socket, Reason),
-            {stop, normal, State}
-    end;
-handle_request(auth_negotiation, {Socket, Method}, _State) ->
-    ok = gen_tcp:send(Socket, <<?SOCKS_VERSION:?UBYTE, Method:?UBYTE>>),
-    {ok, Method};
-handle_request(bind, {ClientSocket, _BindAddr, _BindPort}, State) ->
-    % For BIND, the client specifies the address/port it expects the SOCKS server to bind to.
-    % However, for simplicity, we'll let the OS choose a port and report it back.
-    % A more complete implementation would try to bind to the requested address/port.
-    case gen_tcp:listen(0, ?SOCK_SERVER_OPTIONS) of % Listen on any available port
-        {ok, ListenSocket} ->
-            {ok, {BindAddr, BindPort}} = inet:sockname(ListenSocket),
-            {Atyp, BndAddr, BndPort} = socks5_utils:format_address(BindAddr, BindPort),
-            gen_tcp:send(ClientSocket, <<?SOCKS_VERSION:?UBYTE,
-                                           ?SUCCEEDED:?UBYTE,
-                                           ?RSV:?UBYTE,
-                                           Atyp:?UBYTE,
-                                           BndAddr/binary,
-                                           BndPort:?USHORT>>),
-            inet:setopts(ListenSocket, [{active, once}]), % Wait for the incoming connection
-            {next_state, 'BIND_WAIT_FOR_CONNECTION', State#state{bind_socket = ListenSocket}};
-        {error, Reason} ->
-            ?LOG_ERROR("Bind listen error: ~p", [Reason]),
-            ErrorReply = socks5_utils:reason_to_socks_error(Reason),
-            gen_tcp:send(ClientSocket, <<?SOCKS_VERSION:?UBYTE,
-                                           ErrorReply:?UBYTE,
-                                           ?RSV:?UBYTE,
-                                           ?ATYP_IPV4, 0:32, 0:16>>),
-            {stop, normal, State}
+handshake(Phase, Data) ->
+    try Phase(Data)
+    catch throw:{socks5, Reason} ->
+            ?LOG_INFO("Connection closed: ~p", [Reason]),
+            {stop, normal, Data}
     end.
 
-handle_connect_command(Socket, ?ATYP_IPV4, <<A:?UBYTE, B:?UBYTE, C:?UBYTE, D:?UBYTE, DstPort:?USHORT>>, State) ->
-    handle_request(connect, {Socket, {A,B,C,D}, DstPort}, State);
-handle_connect_command(Socket, ?ATYP_IPV6, <<A:?USHORT, B:?USHORT, C:?USHORT, D:?USHORT,
-                                             E:?USHORT, F:?USHORT, G:?USHORT, H:?USHORT,
-                                             DstPort:?USHORT>>, State) ->
-    handle_request(connect, {Socket, {A,B,C,D,E,F,G,H}, DstPort}, State);
-handle_connect_command(Socket, ?DOMAINNAME, <<Len:?UBYTE, Hostname:Len/binary, DstPort:?USHORT>>, State) ->
-    handle_request(connect, {Socket, binary_to_list(Hostname), DstPort}, State);
-handle_connect_command(Socket, ATyp, _Rest, State) ->
-    ?LOG_ERROR("Unsupported ATYP for CONNECT command: ~p", [ATyp]),
-    gen_tcp:send(Socket, <<?SOCKS_VERSION:?UBYTE, ?ATYP_NOT_SUPPORTED:?UBYTE, ?RSV:?UBYTE, 0:?UINT, 0:?USHORT>>),
-    {next_state, 'SETUP_CONNECTION', State}.
-
-handle_connect_error(Socket, Reason) ->
-    ?LOG_ERROR("Connect to target host error: ~p", [Reason]),
-    ErrorReply = socks5_utils:reason_to_socks_error(Reason),
-    gen_tcp:send(Socket, <<?SOCKS_VERSION:?UBYTE,
-                           ErrorReply:?UBYTE,
-                           ?RSV:?UBYTE,
-                           ?ATYP_IPV4, 0:32, 0:16>>),
-    ok.
-
-handle_bind_command(Socket, ?ATYP_IPV4, <<A:?UBYTE, B:?UBYTE, C:?UBYTE, D:?UBYTE, DstPort:?USHORT>>, State) ->
-    handle_request(bind, {Socket, {A,B,C,D}, DstPort}, State);
-handle_bind_command(Socket, ?ATYP_IPV6, <<A:?USHORT, B:?USHORT, C:?USHORT, D:?USHORT,
-                                          E:?USHORT, F:?USHORT, G:?USHORT, H:?USHORT,
-                                          DstPort:?USHORT>>, State) ->
-    handle_request(bind, {Socket, {A,B,C,D,E,F,G,H}, DstPort}, State);
-handle_bind_command(Socket, ?DOMAINNAME, <<Len:?UBYTE, Hostname:Len/binary, DstPort:?USHORT>>, State) ->
-    handle_request(bind, {Socket, binary_to_list(Hostname), DstPort}, State);
-handle_bind_command(Socket, ATyp, _Rest, State) ->
-    ?LOG_ERROR("Unsupported ATYP for BIND command: ~p", [ATyp]),
-    gen_tcp:send(Socket, <<?SOCKS_VERSION:?UBYTE,
-                           ?ATYP_NOT_SUPPORTED:?UBYTE,
-                           ?RSV:?UBYTE,
-                           ?ATYP_IPV4, 0:32, 0:16>>),
-    {next_state, 'SETUP_CONNECTION', State}.
-
-handle_udp_associate_command(Socket, _ATyp, _Rest, State) ->
-    % The client provides a desired BND.ADDR and BND.PORT, but the server
-    % typically assigns its own UDP port and reports it back.
-    % The ATyp and Rest here are for the desired address, which we'll ignore for now.
-    case gen_udp:open(0, [{active, once}, binary]) of % Open on any available port
-        {ok, UdpSocket} ->
-            {ok, {BoundIP, BoundPort}} = inet:sockname(UdpSocket),
-            {Atyp, BndAddr, _BndPort} = socks5_utils:format_address(BoundIP, BoundPort),
-            gen_tcp:send(Socket, <<?SOCKS_VERSION:?UBYTE,
-                                   ?SUCCEEDED:?UBYTE,
-                                   ?RSV:?UBYTE,
-                                   Atyp:?UBYTE,
-                                   BndAddr/binary,
-                                   BoundPort:?USHORT>>),
-            {next_state, 'UDP_RELAY', State#state{udp_socket = UdpSocket}};
-        {error, Reason} ->
-            ?LOG_ERROR("UDP associate error: ~p", [Reason]),
-            ErrorReply = socks5_utils:reason_to_socks_error(Reason),
-            gen_tcp:send(Socket, <<?SOCKS_VERSION:?UBYTE,
-                                   ErrorReply:?UBYTE,
-                                   ?RSV:?UBYTE,
-                                   ?ATYP_IPV4, 0:32, 0:16>>),
-            {stop, normal, State}
-    end.
-
-close_socket_if_defined(undefined) -> ok;
-close_socket_if_defined(Socket) when is_port(Socket) ->
-    socket:close(Socket).
-
-reset_socket(Socket) ->
-    inet:setopts(Socket, [{active, once}]).
-
-get_methods(Methods, MethodsNum) ->
-    get_methods(Methods, MethodsNum, []).
-
-get_methods(_Methods, 0, MethodList) ->
-    MethodList;
-get_methods(<<Method:?UBYTE, MethodsLeft>>, MethodsNum, MethodList) ->
-    get_methods(MethodsLeft, MethodsNum-1, [Method | MethodList]).
-
-
-get_supported_methods() ->
-    [?USERNAME_PASSWORD, ?NO_AUTHENTICATION_REQUIRED].
-
-get_method(_SupportedMethods, []) ->
-    ?NO_ACCEPTABLE_METHODS;
-get_method([], _MethodList) ->
-    ?NO_ACCEPTABLE_METHODS;
-get_method([M | SupportedMethods], MethodList) ->
-    case lists:member(M, MethodList) of
-        true ->
-            M;
-        false ->
-            get_method(SupportedMethods, MethodList)
-    end.
-
-validate_credentials(Username, Password) ->
-    case socks5_utils:get_user_credentials() of
-        {ok, #{username := ExpectedUsername, password := ExpectedPassword}} ->
-            Username == ExpectedUsername andalso Password == ExpectedPassword;
+negotiate(#state{socket = Socket} = Data) ->
+    case recv(Socket, 2) of
+        <<?SOCKS_VERSION, NMethods>> when NMethods > 0 ->
+            Method = select_method(binary_to_list(recv(Socket, NMethods))),
+            gen_tcp:send(Socket, <<?SOCKS_VERSION, Method>>),
+            case Method of
+                ?NO_ACCEPTABLE_METHODS ->
+                    throw({socks5, no_acceptable_methods});
+                ?NO_AUTHENTICATION_REQUIRED ->
+                    {next_state, 'SETUP_CONNECTION', Data#state{method = Method}, ?RUN};
+                _ ->
+                    {next_state, 'AUTH_CLIENT', Data#state{method = Method}, ?RUN}
+            end;
         _ ->
-            ?LOG_ERROR("No user credentials configured, authentication will always fail."),
-            false
+            throw({socks5, bad_version})
     end.
+
+%% First configured method (in preference order) that the client offers.
+select_method(Offered) ->
+    Codes = [method_code(M) || M <- socks5_utils:auth_methods()],
+    case [C || C <- Codes, lists:member(C, Offered)] of
+        [Code | _] -> Code;
+        []         -> ?NO_ACCEPTABLE_METHODS
+    end.
+
+method_code(no_auth)           -> ?NO_AUTHENTICATION_REQUIRED;
+method_code(gssapi)            -> ?GSSAPI;
+method_code(username_password) -> ?USERNAME_PASSWORD.
+
+authenticate(#state{method = ?USERNAME_PASSWORD, socket = Socket} = Data) ->
+    case recv(Socket, 2) of
+        <<?AUTH_VERSION, ULen>> ->
+            <<User:ULen/binary, PLen>> = recv(Socket, ULen + 1),
+            Pass = recv(Socket, PLen),
+            case socks5_utils:check_password(User, Pass) of
+                true ->
+                    gen_tcp:send(Socket, <<?AUTH_VERSION, ?AUTH_SUCCESS>>),
+                    {next_state, 'SETUP_CONNECTION', Data, ?RUN};
+                false ->
+                    gen_tcp:send(Socket, <<?AUTH_VERSION, ?AUTH_FAILURE>>),
+                    throw({socks5, {auth_failed, User}})
+            end;
+        _ ->
+            throw({socks5, bad_auth_version})
+    end;
+authenticate(#state{method = ?GSSAPI, socket = Socket} = Data) ->
+    Config = case socks5_utils:gssapi() of
+                 undefined -> #{};
+                 Map       -> Map
+             end,
+    case socks5_gssapi:negotiate(Socket, Config) of
+        {ok, clear}     -> {next_state, 'SETUP_CONNECTION', Data, ?RUN};
+        {ok, Gss}       -> {next_state, 'SETUP_CONNECTION', Data#state{gss = Gss}, ?RUN};
+        {error, Reason} -> throw({socks5, {gssapi, Reason}})
+    end.
+
+request(#state{socket = Socket, gss = undefined} = Data) ->
+    case recv(Socket, 4) of
+        <<?SOCKS_VERSION, Cmd, ?RSV, ATyp>> ->
+            {Addr, Port} = recv_address(ATyp, Data),
+            command(Cmd, Addr, Port, Data);
+        _ ->
+            throw({socks5, bad_request})
+    end;
+request(#state{socket = Socket, gss = Gss} = Data) ->
+    case socks5_gssapi:recv_message(Socket, Gss) of
+        {ok, <<?SOCKS_VERSION, Cmd, ?RSV, ATyp, Rest/binary>>, Gss1} ->
+            Data1 = Data#state{gss = Gss1},
+            case socks5_utils:parse_address(ATyp, Rest) of
+                {ok, {Addr, Port, <<>>}} ->
+                    command(Cmd, Addr, Port, Data1);
+                _ ->
+                    reply(?ATYP_NOT_SUPPORTED, Data1),
+                    throw({socks5, {atyp_not_supported, ATyp}})
+            end;
+        {ok, _Other, _} ->
+            throw({socks5, bad_request});
+        {error, Reason} ->
+            throw({socks5, {gssapi, Reason}})
+    end.
+
+recv_address(ATyp, #state{socket = Socket} = Data) ->
+    Bin = case ATyp of
+              ?ATYP_IPV4 ->
+                  recv(Socket, 6);
+              ?ATYP_IPV6 ->
+                  recv(Socket, 18);
+              ?DOMAINNAME ->
+                  <<Len>> = recv(Socket, 1),
+                  <<Len, (recv(Socket, Len + 2))/binary>>;
+              _ ->
+                  reply(?ATYP_NOT_SUPPORTED, Data),
+                  throw({socks5, {atyp_not_supported, ATyp}})
+          end,
+    {ok, {Addr, Port, <<>>}} = socks5_utils:parse_address(ATyp, Bin),
+    {Addr, Port}.
+
+command(?CONNECT, Addr, Port, Data) ->
+    case socks5_utils:connect(Addr, Port, ?TARGET_OPTS) of
+        {ok, Target} ->
+            {ok, Bound} = inet:sockname(Target),
+            connected(Target, reply(?SUCCEEDED, Bound, Data));
+        {error, Reason} ->
+            fail(Reason, Data)
+    end;
+command(?BIND, Addr, _Port, #state{socket = Socket} = Data) ->
+    %% Listen on the address the client reached us on, so the reported
+    %% BND.ADDR is reachable by the peer. One shot: accept in a helper
+    %% process so the client socket keeps being watched meanwhile.
+    Opts = [binary, {active, false}, {ip, local_ip(Socket)}, {backlog, 1}],
+    case gen_tcp:listen(0, Opts) of
+        {ok, Listen} ->
+            {ok, Bound} = inet:sockname(Listen),
+            Data1 = reply(?SUCCEEDED, Bound, Data),
+            Self = self(),
+            spawn_link(fun() ->
+                               Result = gen_tcp:accept(Listen, ?TIMEOUT),
+                               gen_tcp:close(Listen),
+                               case Result of
+                                   {ok, T} -> ok = gen_tcp:controlling_process(T, Self);
+                                   _ -> ok
+                               end,
+                               Self ! {bind_accepted, Result}
+                       end),
+            inet:setopts(Socket, ?ACTIVE_ONCE),
+            {next_state, 'BIND_WAIT_FOR_CONNECTION', Data1#state{expect = Addr}};
+        {error, Reason} ->
+            fail(Reason, Data)
+    end;
+command(?UDP_ASSOCIATE, Addr, Port, #state{socket = Socket} = Data) ->
+    case open_udp() of
+        {ok, Udp, Family} ->
+            {ok, UdpPort} = inet:port(Udp),
+            Data1 = reply(?SUCCEEDED, {local_ip(Socket), UdpPort}, Data),
+            inet:setopts(Socket, ?ACTIVE_ONCE),
+            Data2 = Data1#state{udp = Udp, udp_family = Family,
+                                client_udp = client_udp(Socket, Addr, Port)},
+            {next_state, 'UDP_RELAY', Data2, idle(Data2)};
+        {error, Reason} ->
+            fail(Reason, Data)
+    end;
+command(Cmd, _Addr, _Port, Data) ->
+    reply(?CMD_NOT_SUPPORTED, Data),
+    throw({socks5, {cmd_not_supported, Cmd}}).
+
+fail(Reason, Data) ->
+    reply(socks5_utils:reason_to_socks_error(Reason), Data),
+    throw({socks5, Reason}).
+
+%% Both sockets active; exit_on_close off so a half-closed socket can
+%% still carry the other direction.
+connected(Target, #state{socket = Socket} = Data) ->
+    Opts = [{active, once}, {exit_on_close, false}],
+    inet:setopts(Socket, Opts),
+    inet:setopts(Target, Opts),
+    {next_state, 'CONNECTED', Data#state{target = Target}, idle(Data)}.
+
+%% A dual-stack socket relays to IPv4 and IPv6 targets alike; plain
+%% IPv4 is the fallback on hosts without IPv6.
+open_udp() ->
+    case gen_udp:open(0, [binary, {active, once}, inet6, {ipv6_v6only, false}]) of
+        {ok, Udp} ->
+            {ok, Udp, inet6};
+        {error, _} ->
+            case gen_udp:open(0, [binary, {active, once}]) of
+                {ok, Udp} -> {ok, Udp, inet};
+                Error     -> Error
+            end
+    end.
+
+%%%===================================================================
+%%% Relay helpers
+%%%===================================================================
+
+forward(To, Plain, From, Data) ->
+    case gen_tcp:send(To, Plain) of
+        ok ->
+            inet:setopts(From, ?ACTIVE_ONCE),
+            {keep_state, Data, idle(Data)};
+        {error, _} ->
+            stop
+    end.
+
+%% Client -> remote datagram: de-encapsulate, strip the request header,
+%% resolve and send. Fragments (FRAG =/= 0) and malformed ones are dropped.
+relay_out(Packet, #state{gss = undefined} = Data) ->
+    send_out(Packet, Data),
+    Data;
+relay_out(Packet, #state{gss = Gss} = Data) ->
+    case socks5_gssapi:unwrap(Packet, Gss) of
+        {ok, Plain, Gss1} ->
+            send_out(Plain, Data),
+            Data#state{gss = Gss1};
+        {error, Reason, Gss1} ->
+            ?LOG_WARNING("GSSAPI: dropped client datagram: ~p", [Reason]),
+            Data#state{gss = Gss1}
+    end.
+
+send_out(<<?RSV:?USHORT, 0, ATyp, Rest/binary>>, #state{udp = Udp, udp_family = Family}) ->
+    case socks5_utils:parse_address(ATyp, Rest) of
+        {ok, {Addr, Port, Payload}} ->
+            case udp_target(Addr, Family) of
+                {ok, IP} -> gen_udp:send(Udp, IP, Port, Payload);
+                error    -> ok
+            end;
+        error ->
+            ok
+    end;
+send_out(_Packet, _Data) ->
+    ok.
+
+udp_target(Addr, Family) ->
+    case socks5_utils:resolve(Addr) of
+        {ok, IPs} ->
+            case [IP || IP <- IPs, Family =:= inet6 orelse tuple_size(IP) =:= 4] of
+                [IP | _] when Family =:= inet6 -> {ok, socks5_utils:map6(IP)};
+                [IP | _]                       -> {ok, IP};
+                []                             -> error
+            end;
+        {error, _} ->
+            error
+    end.
+
+%% Remote -> client datagram: prepend the header carrying the remote's
+%% address, encapsulate if needed.
+relay_in(Remote, Payload, #state{udp = Udp, udp_family = Family,
+                                 client_udp = {ClientIP, ClientPort}} = Data) ->
+    Header = socks5_utils:encode_address(Remote),
+    Msg = <<?RSV:?USHORT, 0, Header/binary, Payload/binary>>,
+    {Datagram, Data1} = encapsulate(Msg, Data),
+    IP = case Family of
+             inet6 -> socks5_utils:map6(ClientIP);
+             inet  -> ClientIP
+         end,
+    gen_udp:send(Udp, IP, ClientPort, Datagram),
+    Data1.
+
+%% The endpoint the client said it will send from; unknown parts are
+%% taken from the TCP peer (IP) or learned from the first datagram (port).
+client_udp(Socket, Addr, Port) ->
+    {ok, {PeerIP, _}} = inet:peername(Socket),
+    IP = case socks5_utils:resolve(Addr) of
+             {ok, [Given | _]} ->
+                 case unspecified(Given) of
+                     true  -> PeerIP;
+                     false -> Given
+                 end;
+             {error, _} ->
+                 PeerIP
+         end,
+    {IP, case Port of 0 -> undefined; _ -> Port end}.
+
+peer_allowed(PeerIP, Expect) when is_tuple(Expect) ->
+    Expect =:= PeerIP orelse unspecified(Expect);
+peer_allowed(_PeerIP, _Domain) ->
+    true.
+
+unspecified(IP) ->
+    lists:all(fun(X) -> X =:= 0 end, tuple_to_list(IP)).
+
+other(Socket, #state{socket = Socket, target = Target}) -> Target;
+other(_Target, #state{socket = Socket})                 -> Socket.
+
+idle(#state{idle = Idle}) ->
+    {{timeout, idle}, Idle, idle}.
+
+%%%===================================================================
+%%% Socket helpers
+%%%===================================================================
+
+reply(Rep, Data) ->
+    reply(Rep, {{0, 0, 0, 0}, 0}, Data).
+
+reply(Rep, Bound, Data) ->
+    Addr = socks5_utils:encode_address(Bound),
+    {_, Data1} = send_to_client(<<?SOCKS_VERSION, Rep, ?RSV, Addr/binary>>, Data),
+    Data1.
+
+send_to_client(Msg, #state{socket = Socket} = Data) ->
+    {Bytes, Data1} = encapsulate(Msg, Data),
+    {gen_tcp:send(Socket, Bytes), Data1}.
+
+encapsulate(Msg, #state{gss = undefined} = Data) ->
+    {Msg, Data};
+encapsulate(Msg, #state{gss = Gss} = Data) ->
+    {Frames, Gss1} = socks5_gssapi:wrap(Msg, Gss),
+    {Frames, Data#state{gss = Gss1}}.
+
+recv(_Socket, 0) ->
+    <<>>;
+recv(Socket, Len) ->
+    case gen_tcp:recv(Socket, Len, ?TIMEOUT) of
+        {ok, Bin}       -> Bin;
+        {error, Reason} -> throw({socks5, {recv, Reason}})
+    end.
+
+local_ip(Socket) ->
+    {ok, {IP, _}} = inet:sockname(Socket),
+    IP.

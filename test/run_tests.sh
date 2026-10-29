@@ -40,9 +40,8 @@ if [ ! -d "$RELEASE_DIR" ]; then
 fi
 
 # Start the application
-$RELEASE_DIR/bin/socks5 daemon &
-SOCKS5_PID=$!
-echo "SOCKS5 application started with PID: $SOCKS5_PID"
+$RELEASE_DIR/bin/socks5 daemon
+echo "SOCKS5 application started"
 
 # Give it a moment to start up
 sleep 5
@@ -51,7 +50,7 @@ echo "Checking if SOCKS5 is listening on port 1080..."
 ss -tlnp | grep ":1080"
 if [ $? -ne 0 ]; then
     echo "SOCKS5 application not listening on port 1080. Tests failed."
-    kill $SOCKS5_PID
+    $RELEASE_DIR/bin/socks5 stop
     exit 1
 fi
 echo "SOCKS5 is listening on port 1080."
@@ -59,7 +58,7 @@ echo "SOCKS5 is listening on port 1080."
 echo "Testing SOCKS5 proxy with curl..."
 # Use a known public endpoint for testing
 CURL_TEST_URL="http://example.com"
-CURL_OUTPUT=$(curl --socks5-hostname localhost:1080 $CURL_TEST_URL 2>&1)
+CURL_OUTPUT=$(curl --socks5-hostname localhost:1080 --proxy-user testuser:testpass $CURL_TEST_URL 2>&1)
 
 if echo "$CURL_OUTPUT" | grep -q "Example Domain"; then
     echo "Curl test successful! Received expected content from $CURL_TEST_URL."
@@ -67,12 +66,11 @@ if echo "$CURL_OUTPUT" | grep -q "Example Domain"; then
 else
     echo "Curl test failed. Unexpected output or connection issue."
     echo "Curl output: $CURL_OUTPUT"
-    kill $SOCKS5_PID
+    $RELEASE_DIR/bin/socks5 stop
     exit 1
 fi
 
 echo "Stopping SOCKS5 application..."
-kill $SOCKS5_PID
-wait $SOCKS5_PID 2>/dev/null # Wait for the process to terminate
+$RELEASE_DIR/bin/socks5 stop
 
 echo "All tests passed successfully!"

@@ -2,43 +2,23 @@
 %% @doc socks5 top level supervisor.
 %% @end
 %%%-------------------------------------------------------------------
-
 -module(socks5_sup).
 
 -behaviour(supervisor).
 
 -author("ao.song@outlook.com").
 
--include("socks5.hrl").
-
-%% API
 -export([start_link/0]).
-
-%% Supervisor callbacks
 -export([init/1]).
 
--define(SERVER, ?MODULE).
-
-%%====================================================================
-%% API functions
-%%====================================================================
-
 start_link() ->
-    supervisor:start_link({local, ?SERVER}, ?MODULE, []).
+    supervisor:start_link({local, ?MODULE}, ?MODULE, []).
 
-%%====================================================================
-%% Supervisor callbacks
-%%====================================================================
-
+%% The worker supervisor starts first: the listener hands sockets to it.
 init([]) ->
-    {ok, {{one_for_one, ?MAX_RESTART, ?MAX_TIME},
-          [% socks listener
-           ?CHILD(socks5_listener, worker, []),           
-           % connection handler
-           ?CHILD(socks5_worker_sup, supervisor, [])
-          ]}}.
-
-%%====================================================================
-%% Internal functions
-%%====================================================================
-
+    {ok, {#{strategy => one_for_one, intensity => 5, period => 60},
+          [#{id => socks5_worker_sup,
+             start => {socks5_worker_sup, start_link, []},
+             type => supervisor},
+           #{id => socks5_listener,
+             start => {socks5_listener, start_link, []}}]}}.
